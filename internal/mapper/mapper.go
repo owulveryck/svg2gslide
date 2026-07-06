@@ -16,8 +16,12 @@ import (
 const (
 	emuPerPt = 12700.0
 	// Extra width added to text boxes so the estimated text width never
-	// wraps; the surplus is symmetric because paragraphs are centered.
+	// wraps; the paragraph alignment matches the SVG text anchor, so the
+	// surplus spills away from the anchored edge.
 	textBoxSlackEMU = 250000.0
+	// Default text box inset (0.1") on each side, compensated so anchored
+	// text starts exactly on the SVG anchor point.
+	textInsetEMU = 91440.0
 )
 
 // Config parametrizes a conversion run.
@@ -81,6 +85,9 @@ func (m *Mapper) walk(e *svgpkg.Element, parent svgpkg.Matrix) {
 		if m.map3DBox(e, mat) {
 			return
 		}
+		if m.mapCylinder(e, mat) {
+			return
+		}
 		for _, c := range e.Children {
 			m.walk(c, mat)
 		}
@@ -140,6 +147,10 @@ func (m *Mapper) mapRect(e *svgpkg.Element, mat svgpkg.Matrix) {
 	w := e.FloatAttr("width", 0) * sx
 	h := e.FloatAttr("height", 0) * sy
 	if w <= 0 || h <= 0 {
+		return
+	}
+	// Fully transparent, stroke-less rectangles are hitbox/spacer helpers.
+	if s := e.Attr("stroke"); (s == "" || s == "none") && e.FloatAttr("fill-opacity", 1) <= 0.01 {
 		return
 	}
 	// The full-canvas background rectangle would only get in the way of
@@ -225,8 +236,136 @@ func (m *Mapper) map3DBox(e *svgpkg.Element, mat svgpkg.Matrix) bool {
 	return true
 }
 
+// mapCylinder recognizes a group drawn as a cylinder — a filled closed path
+// with cubic sides plus a stroke-only cubic path for the lid seam (PlantUML
+// database and queue participants) — and replaces both paths by a native CAN
+// shape, rotated when the cylinder lies on its side. Returns false when the
+// group doesn't match.
+func (m *Mapper) mapCylinder(e *svgpkg.Element, mat svgpkg.Matrix) bool {
+	var body, lid *svgpkg.Element
+	for _, c := range e.Children {
+		if c.Tag != "path" {
+			continue
+		}
+		segs, err := svgpkg.ParsePathD(c.Attr("d"))
+		if err != nil {
+			return false
+		}
+		cubics := 0
+		for _, s := range segs {
+			if s.Op == 'C' {
+				cubics += len(s.Args) / 6
+			}
+		}
+		switch {
+		case cubics >= 2 && isFilled(c) && body == nil:
+			body = c
+		case cubics >= 1 && !isFilled(c) && lid == nil:
+			lid = c
+		default:
+			return false
+		}
+	}
+	if body == nil || lid == nil {
+		return false
+	}
+
+	bodyBox := applyAll(mat, pathEndpoints(body))
+	lidBox := applyAll(mat, pathEndpoints(lid))
+	minX, minY, w, h := bbox(bodyBox)
+	if w <= 0 || h <= 0 {
+		return false
+	}
+	_, _, lw, lh := bbox(lidBox)
+
+	id := m.nextID()
+	if lw >= lh {
+		// Flat lid: upright cylinder.
+		ex, ey := m.toEMU(minX, minY)
+		m.createShape(id, "CAN", ex, ey, m.lenEMU(w), m.lenEMU(h), 0)
+	} else {
+		// Tall lid on the side: cylinder lying down, rotate the CAN 90°
+		// clockwise so its top faces right (same transform layout as
+		// mapTrianglePolygon).
+		ecx, ecy := m.toEMU(minX+w/2, minY+h/2)
+		wEMU, hEMU := m.lenEMU(h), m.lenEMU(w)
+		cos, sin := 0.0, 1.0
+		tx := ecx - (cos*wEMU/2 - sin*hEMU/2)
+		ty := ecy - (sin*wEMU/2 + cos*hEMU/2)
+		m.reqs = append(m.reqs, &slides.Request{CreateShape: &slides.CreateShapeRequest{
+			ObjectId:  id,
+			ShapeType: "CAN",
+			ElementProperties: &slides.PageElementProperties{
+				PageObjectId: m.cfg.SlideID,
+				Size:         sizeEMU(wEMU, hEMU),
+				Transform: &slides.AffineTransform{
+					ScaleX: cos, ShearX: -sin,
+					ShearY: sin, ScaleY: cos,
+					TranslateX: tx, TranslateY: ty,
+					Unit:            "EMU",
+					ForceSendFields: []string{"ScaleX", "ScaleY", "ShearX", "ShearY", "TranslateX", "TranslateY"},
+				},
+			},
+		}})
+	}
+	m.styleShape(id, body, mat)
+	m.warnf("groupe %q approximé par une forme CAN", e.Attr("class"))
+
+	for _, c := range e.Children {
+		if c.Tag == "path" {
+			continue // absorbed by the cylinder
+		}
+		m.walk(c, mat)
+	}
+	return true
+}
+
+// pathEndpoints returns the on-curve points of a path (control points are
+// excluded, which is what a footprint bbox wants).
+func pathEndpoints(e *svgpkg.Element) [][2]float64 {
+	segs, err := svgpkg.ParsePathD(e.Attr("d"))
+	if err != nil {
+		return nil
+	}
+	var pts [][2]float64
+	var cur [2]float64
+	add := func(x, y float64) {
+		cur = [2]float64{x, y}
+		pts = append(pts, cur)
+	}
+	for _, s := range segs {
+		switch s.Op {
+		case 'M', 'L':
+			for i := 0; i+1 < len(s.Args); i += 2 {
+				add(s.Args[i], s.Args[i+1])
+			}
+		case 'Q':
+			for i := 0; i+3 < len(s.Args); i += 4 {
+				add(s.Args[i+2], s.Args[i+3])
+			}
+		case 'C':
+			for i := 0; i+5 < len(s.Args); i += 6 {
+				add(s.Args[i+4], s.Args[i+5])
+			}
+		case 'A':
+			for i := 0; i+6 < len(s.Args); i += 7 {
+				add(s.Args[i+5], s.Args[i+6])
+			}
+		case 'H':
+			for _, x := range s.Args {
+				add(x, cur[1])
+			}
+		case 'V':
+			for _, y := range s.Args {
+				add(cur[0], y)
+			}
+		}
+	}
+	return pts
+}
+
 func (m *Mapper) mapPolygon(e *svgpkg.Element, mat svgpkg.Matrix) {
-	pts := svgpkg.ParsePoints(e.Attr("points"))
+	pts := dropClosingPoint(svgpkg.ParsePoints(e.Attr("points")))
 	switch {
 	case len(pts) == 3:
 		m.mapTrianglePolygon(e, pts, mat)
@@ -237,9 +376,70 @@ func (m *Mapper) mapPolygon(e *svgpkg.Element, mat svgpkg.Matrix) {
 		ex, ey := m.toEMU(minX, minY)
 		m.createShape(id, "RECTANGLE", ex, ey, m.lenEMU(w), m.lenEMU(h), 0)
 		m.styleShape(id, e, mat)
+	case len(pts) == 4:
+		if tri, apex, ok := dartApexTriangle(pts); ok {
+			m.emitTriangle(e, applyAll(mat, tri), matApply(mat, apex), mat)
+			return
+		}
+		tpts := applyAll(mat, pts)
+		minX, minY, w, h := bbox(tpts)
+		id := m.nextID()
+		ex, ey := m.toEMU(minX, minY)
+		m.createShape(id, "RECTANGLE", ex, ey, m.lenEMU(w), m.lenEMU(h), 0)
+		m.styleShape(id, e, mat)
+		m.warnf("quadrilatère %q approximé par un rectangle", e.Attr("class"))
 	default:
 		m.warnf("polygone à %d points ignoré (classe %q)", len(pts), e.Attr("class"))
 	}
+}
+
+// dropClosingPoint removes a trailing point that duplicates the first one
+// (polygons are implicitly closed, some generators repeat the start point).
+func dropClosingPoint(pts [][2]float64) [][2]float64 {
+	if n := len(pts); n >= 2 &&
+		math.Abs(pts[0][0]-pts[n-1][0]) < 0.01 && math.Abs(pts[0][1]-pts[n-1][1]) < 0.01 {
+		return pts[:n-1]
+	}
+	return pts
+}
+
+// dartApexTriangle reduces a concave quadrilateral (arrowhead "dart") to the
+// triangle spanned by its convex vertices. The apex is the vertex opposite
+// the single reflex vertex, which is where such an arrowhead points.
+func dartApexTriangle(pts [][2]float64) (tri [][2]float64, apex [2]float64, ok bool) {
+	if len(pts) != 4 {
+		return nil, apex, false
+	}
+	area := 0.0
+	for i := range pts {
+		p, q := pts[i], pts[(i+1)%4]
+		area += p[0]*q[1] - q[0]*p[1]
+	}
+	reflex := -1
+	for i := range pts {
+		prev, cur, next := pts[(i+3)%4], pts[i], pts[(i+1)%4]
+		cross := (cur[0]-prev[0])*(next[1]-cur[1]) - (cur[1]-prev[1])*(next[0]-cur[0])
+		if cross*area < 0 {
+			if reflex >= 0 {
+				return nil, apex, false // self-intersecting, not a dart
+			}
+			reflex = i
+		}
+	}
+	if reflex < 0 {
+		return nil, apex, false // convex quadrilateral
+	}
+	for i := range pts {
+		if i != reflex {
+			tri = append(tri, pts[i])
+		}
+	}
+	return tri, pts[(reflex+2)%4], true
+}
+
+func matApply(mat svgpkg.Matrix, p [2]float64) [2]float64 {
+	x, y := mat.Apply(p[0], p[1])
+	return [2]float64{x, y}
 }
 
 // mapTrianglePolygon maps a 3-point polygon (arrowhead chevrons) onto the
@@ -259,6 +459,14 @@ func (m *Mapper) mapTrianglePolygon(e *svgpkg.Element, pts [][2]float64, mat svg
 			apex = p
 		}
 	}
+	m.emitTriangle(e, pts, apex, mat)
+}
+
+// emitTriangle creates a native TRIANGLE covering pts (already transformed),
+// rotated so it points toward apex.
+func (m *Mapper) emitTriangle(e *svgpkg.Element, pts [][2]float64, apex [2]float64, mat svgpkg.Matrix) {
+	minX, minY, w, h := bbox(pts)
+	cx, cy := minX+w/2, minY+h/2
 	pointing := math.Atan2(apex[1]-cy, apex[0]-cx)
 	// The Slides TRIANGLE points up (-y): rotate by pointing - (-90°).
 	rot := pointing + math.Pi/2
@@ -345,35 +553,33 @@ func (m *Mapper) mapPath(e *svgpkg.Element, mat svgpkg.Matrix) {
 		m.warnf("path %q ignoré: %v", e.Attr("class"), err)
 		return
 	}
-	var closed bool
-	hasCubic := false
+	// Walk segments, emitting one connector (or native ARC shape) per
+	// L/Q/C/A command. The marker-end arrowhead goes on the last connector.
+	var pieces []pathPiece
+	var cur, start [2]float64
+	var outline [][2]float64
+	closed, hasStart := false, false
 	for _, s := range segs {
 		switch s.Op {
 		case 'Z':
 			closed = true
-		case 'C':
-			hasCubic = true
-		}
-	}
-	if closed || hasCubic {
-		m.warnf("path %q (forme libre fermée ou cubique) ignoré", e.Attr("class"))
-		return
-	}
-
-	// Walk segments, emitting one connector (or native ARC shape) per
-	// L/Q/A command. The marker-end arrowhead goes on the last connector.
-	var pieces []pathPiece
-	var cur [2]float64
-	for _, s := range segs {
-		switch s.Op {
+			if cur != start {
+				pieces = append(pieces, pathPiece{category: "STRAIGHT", p0: cur, p1: start})
+				cur = start
+			}
 		case 'M':
 			if len(s.Args) >= 2 {
 				cur = [2]float64{s.Args[0], s.Args[1]}
+				if !hasStart {
+					start, hasStart = cur, true
+				}
+				outline = append(outline, cur)
 			}
 		case 'L':
 			for i := 0; i+1 < len(s.Args); i += 2 {
 				pieces = append(pieces, pathPiece{category: "STRAIGHT", p0: cur, p1: [2]float64{s.Args[i], s.Args[i+1]}})
 				cur = [2]float64{s.Args[i], s.Args[i+1]}
+				outline = append(outline, cur)
 			}
 		case 'Q':
 			for i := 0; i+3 < len(s.Args); i += 4 {
@@ -381,6 +587,16 @@ func (m *Mapper) mapPath(e *svgpkg.Element, mat svgpkg.Matrix) {
 				end := [2]float64{s.Args[i+2], s.Args[i+3]}
 				pieces = append(pieces, quadPieces(cur, ctrl, end)...)
 				cur = end
+				outline = append(outline, cur)
+			}
+		case 'C':
+			for i := 0; i+5 < len(s.Args); i += 6 {
+				c1 := [2]float64{s.Args[i], s.Args[i+1]}
+				c2 := [2]float64{s.Args[i+2], s.Args[i+3]}
+				end := [2]float64{s.Args[i+4], s.Args[i+5]}
+				pieces = append(pieces, cubicPieces(cur, c1, c2, end)...)
+				cur = end
+				outline = append(outline, cur)
 			}
 		case 'A':
 			for i := 0; i+6 < len(s.Args); i += 7 {
@@ -391,20 +607,40 @@ func (m *Mapper) mapPath(e *svgpkg.Element, mat svgpkg.Matrix) {
 					pieces = append(pieces, pathPiece{category: "CURVED", p0: cur, p1: end})
 				}
 				cur = end
+				outline = append(outline, cur)
 			}
 		case 'H':
 			for _, x := range s.Args {
 				pieces = append(pieces, pathPiece{category: "STRAIGHT", p0: cur, p1: [2]float64{x, cur[1]}})
 				cur[0] = x
+				outline = append(outline, cur)
 			}
 		case 'V':
 			for _, y := range s.Args {
 				pieces = append(pieces, pathPiece{category: "STRAIGHT", p0: cur, p1: [2]float64{cur[0], y}})
 				cur[1] = y
+				outline = append(outline, cur)
 			}
 		}
 	}
 	if len(pieces) == 0 {
+		return
+	}
+	// Some generators close a subpath by drawing back to its start instead
+	// of using Z (PlantUML cylinders do this).
+	if hasStart && math.Hypot(cur[0]-start[0], cur[1]-start[1]) < 0.5 {
+		closed = true
+	}
+	// A closed, filled path is a free-form solid: keep its footprint as a
+	// rounded rectangle rather than exploding it into stray connectors.
+	if closed && isFilled(e) {
+		tpts := applyAll(mat, outline)
+		minX, minY, w, h := bbox(tpts)
+		id := m.nextID()
+		ex, ey := m.toEMU(minX, minY)
+		m.createShape(id, "ROUND_RECTANGLE", ex, ey, m.lenEMU(w), m.lenEMU(h), 0)
+		m.styleShape(id, e, mat)
+		m.warnf("path fermé %q approximé par sa boîte englobante", pathLabel(e))
 		return
 	}
 	if len(pieces) > 1 {
@@ -460,6 +696,31 @@ func quadPieces(p0, ctrl, p1 [2]float64) []pathPiece {
 		}
 	}
 	return []pathPiece{{category: "CURVED", p0: p0, p1: p1}}
+}
+
+// cubicPieces approximates one cubic bezier with the same strategy as
+// quadPieces, splitting at the true curve midpoint when the bow is deep.
+func cubicPieces(p0, c1, c2, p1 [2]float64) []pathPiece {
+	mid := [2]float64{
+		(p0[0] + 3*c1[0] + 3*c2[0] + p1[0]) / 8,
+		(p0[1] + 3*c1[1] + 3*c2[1] + p1[1]) / 8,
+	}
+	chordMid := [2]float64{(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2}
+	dev := math.Hypot(mid[0]-chordMid[0], mid[1]-chordMid[1])
+	chord := math.Hypot(p1[0]-p0[0], p1[1]-p0[1])
+	if chord > 0 && dev > 0.2*chord {
+		return []pathPiece{
+			{category: "CURVED", p0: p0, p1: mid},
+			{category: "CURVED", p0: mid, p1: p1},
+		}
+	}
+	return []pathPiece{{category: "CURVED", p0: p0, p1: p1}}
+}
+
+// isFilled reports whether the element paints its interior.
+func isFilled(e *svgpkg.Element) bool {
+	_, ok := parseColor(e.Attr("fill"))
+	return ok && e.FloatAttr("fill-opacity", 1) > 0.01
 }
 
 // quarterArcPiece recognizes a circular 90° arc whose endpoints are axis
@@ -625,17 +886,11 @@ func (m *Mapper) mapText(e *svgpkg.Element, mat svgpkg.Matrix) {
 	bold := e.Attr("font-weight") == "bold"
 	italic := e.Attr("font-style") == "italic"
 
-	// Rough width estimate to size the box; centered paragraphs make the
-	// slack symmetric so the estimate only needs to avoid wrapping.
+	// Box width: exact when the generator provides textLength, otherwise a
+	// rough estimate padded with slack so the text never wraps.
 	est := estimateTextWidth(content, e.FloatAttr("font-size", 10)) * sx
-	var centerX float64
-	switch anchor {
-	case "middle":
-		centerX = x
-	case "end":
-		centerX = x - est/2
-	default:
-		centerX = x + est/2
+	if tl := e.FloatAttr("textLength", 0); tl > 0 {
+		est = tl * sx
 	}
 	// The SVG y is the baseline; the visual center of a line of text sits
 	// roughly 0.35em above it.
@@ -643,17 +898,33 @@ func (m *Mapper) mapText(e *svgpkg.Element, mat svgpkg.Matrix) {
 
 	wEMU := m.lenEMU(est) + textBoxSlackEMU
 	hEMU := m.lenEMU(fontSize*1.9) + 100000
-	ecx, ecy := m.toEMU(centerX, centerY)
+	ex, ecy := m.toEMU(x, centerY)
+
+	// The paragraph alignment mirrors the SVG anchor, so the anchored edge
+	// stays exact and the slack spills to the free side. textInsetEMU
+	// compensates the text box's built-in padding on the anchored edge.
+	alignment := "CENTER"
+	var boxX float64
+	switch anchor {
+	case "middle":
+		boxX = ex - wEMU/2
+	case "end":
+		alignment = "END"
+		boxX = ex - wEMU + textInsetEMU
+	default: // "start" per the SVG spec
+		alignment = "START"
+		boxX = ex - textInsetEMU
+	}
 
 	id := m.nextID()
-	m.createShape(id, "TEXT_BOX", ecx-wEMU/2, ecy-hEMU/2, wEMU, hEMU, 0)
+	m.createShape(id, "TEXT_BOX", boxX, ecy-hEMU/2, wEMU, hEMU, 0)
 	m.reqs = append(m.reqs, &slides.Request{InsertText: &slides.InsertTextRequest{
 		ObjectId: id,
 		Text:     content,
 	}})
 
 	style := &slides.TextStyle{
-		FontFamily:      m.cfg.FontFamily,
+		FontFamily:      m.resolveFont(e),
 		FontSize:        &slides.Dimension{Magnitude: ptSize(fontSize, m.cfg.Scale), Unit: "PT"},
 		Bold:            bold,
 		Italic:          italic,
@@ -672,7 +943,7 @@ func (m *Mapper) mapText(e *svgpkg.Element, mat svgpkg.Matrix) {
 	}})
 	m.reqs = append(m.reqs, &slides.Request{UpdateParagraphStyle: &slides.UpdateParagraphStyleRequest{
 		ObjectId:  id,
-		Style:     &slides.ParagraphStyle{Alignment: "CENTER"},
+		Style:     &slides.ParagraphStyle{Alignment: alignment},
 		TextRange: &slides.Range{Type: "ALL"},
 		Fields:    "alignment",
 	}})
@@ -681,6 +952,27 @@ func (m *Mapper) mapText(e *svgpkg.Element, mat svgpkg.Matrix) {
 		ShapeProperties: &slides.ShapeProperties{ContentAlignment: "MIDDLE"},
 		Fields:          "contentAlignment",
 	}})
+}
+
+// resolveFont picks the Slides font for a text element: its own font-family
+// (generic CSS families mapped to stock fonts), else the document default.
+func (m *Mapper) resolveFont(e *svgpkg.Element) string {
+	f := strings.TrimSpace(e.Attr("font-family"))
+	if i := strings.IndexByte(f, ','); i >= 0 {
+		f = strings.TrimSpace(f[:i])
+	}
+	f = strings.Trim(f, `'"`)
+	switch strings.ToLower(f) {
+	case "":
+		return m.cfg.FontFamily
+	case "sans-serif":
+		return "Arial"
+	case "serif":
+		return "Times New Roman"
+	case "monospace":
+		return "Courier New"
+	}
+	return f
 }
 
 // ptSize converts an SVG font size (user units) to Slides points, given the

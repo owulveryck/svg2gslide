@@ -41,6 +41,7 @@ func Parse(r io.Reader) (*Element, error) {
 			for _, a := range t.Attr {
 				el.Attrs[a.Name.Local] = a.Value
 			}
+			mergeInlineStyle(el.Attrs)
 			if cur == nil {
 				root = el
 			} else {
@@ -65,6 +66,37 @@ func Parse(r io.Reader) (*Element, error) {
 		return nil, fmt.Errorf("no root element found")
 	}
 	return root, nil
+}
+
+// inlineStyleProps lists the presentation properties promoted from the
+// inline style attribute into Attrs. Geometry keys (width, height, ...) are
+// deliberately excluded: the root <svg> often carries them in style and they
+// must not override the geometric attributes.
+var inlineStyleProps = map[string]bool{
+	"stroke": true, "stroke-width": true, "stroke-dasharray": true,
+	"stroke-opacity": true, "fill": true, "fill-opacity": true,
+	"opacity": true, "font-family": true, "font-size": true,
+	"font-weight": true, "font-style": true, "text-anchor": true,
+	"visibility": true, "display": true,
+}
+
+// mergeInlineStyle folds style="k:v;..." declarations into the attribute map.
+// Per the SVG cascade, an inline style declaration overrides the matching
+// presentation attribute.
+func mergeInlineStyle(attrs map[string]string) {
+	style, ok := attrs["style"]
+	if !ok {
+		return
+	}
+	for decl := range strings.SplitSeq(style, ";") {
+		k, v, ok := strings.Cut(decl, ":")
+		if !ok {
+			continue
+		}
+		if k = strings.TrimSpace(k); inlineStyleProps[k] {
+			attrs[k] = strings.TrimSpace(v)
+		}
+	}
 }
 
 // Attr returns the attribute value or "" if absent.

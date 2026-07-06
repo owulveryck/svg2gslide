@@ -25,6 +25,27 @@ func loadTestSVG(t *testing.T) (*Element, *Stylesheet) {
 	return root, ParseStylesheet(styleEl.RawTextContent())
 }
 
+func TestMergeInlineStyle(t *testing.T) {
+	attrs := map[string]string{
+		"style":  "stroke:#181818;stroke-width:0.5;stroke-dasharray:5,5;width:608px;background:#FFFFFF",
+		"stroke": "#ff0000",
+		"width":  "8",
+	}
+	mergeInlineStyle(attrs)
+	if attrs["stroke"] != "#181818" {
+		t.Errorf("stroke = %q, want inline style to win over the presentation attribute", attrs["stroke"])
+	}
+	if attrs["stroke-width"] != "0.5" || attrs["stroke-dasharray"] != "5,5" {
+		t.Errorf("stroke-width/dasharray = %q/%q, want promoted from style", attrs["stroke-width"], attrs["stroke-dasharray"])
+	}
+	if attrs["width"] != "8" {
+		t.Errorf("width = %q, want geometry attributes untouched by style", attrs["width"])
+	}
+	if _, ok := attrs["background"]; ok {
+		t.Error("background promoted from style, want it ignored (not whitelisted)")
+	}
+}
+
 // findByClass returns the first element carrying the class.
 func findByClass(e *Element, class string) *Element {
 	if e.HasClass(class) {
