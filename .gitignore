@@ -19,6 +19,9 @@
 # Except the GitHub Actions workflows
 !.github/workflows/*.yml
 
+# Except the fixture required by internal/svg tests
+!testdata/sdlc-phase-8.svg
+
 # Except directories (needed to recurse into them)
 !*/
 
