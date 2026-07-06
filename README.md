@@ -37,6 +37,46 @@ Maintenance utility:
 go run ./cmd/presctl -presentation <ID> -delete-slide <SLIDE_OBJECT_ID> -export-pdf /tmp/deck.pdf
 ```
 
+## Web frontend (WebAssembly)
+
+The same conversion pipeline runs entirely in the browser: sign in with
+Google, pick an SVG, paste the presentation URL, convert. No server-side
+component — the page talks directly to the Slides REST API.
+
+### One-time Google Cloud setup
+
+1. In a Google Cloud project with the **Google Slides API** enabled, open
+   *APIs & Services → Credentials → Create credentials → OAuth client ID →
+   **Web application***.
+2. Add `http://localhost:8000` to **Authorized JavaScript origins** (plus
+   your production origin if you host the page). No redirect URI is needed.
+3. If the OAuth consent screen is in *Testing* status, add your Google
+   account as a test user.
+4. Copy the client ID (`….apps.googleusercontent.com`) — you'll paste it in
+   the page (it is remembered in `localStorage`).
+
+The desktop-client JSON used by the CLI cannot be reused: the browser flow
+requires a *Web application* client type.
+
+### Build & run
+
+```sh
+make serve   # builds web/main.wasm + copies wasm_exec.js, serves on :8000
+```
+
+then open <http://localhost:8000>. `make wasm` builds the assets only; any
+static file server works (the page must be served over http(s), not
+`file://`, or Google sign-in refuses to issue a token).
+
+Notes:
+
+- `web/main.wasm` is ~28 MB raw (~6 MB gzipped) — serve compressed in
+  production.
+- Auth uses the Google Identity Services token flow, scope
+  `https://www.googleapis.com/auth/presentations` only. Tokens last ~1 h;
+  the page silently re-requests one on expiry.
+- Thumbnail/PDF export are CLI-only.
+
 ## How it works
 
 1. SVG parsing (`internal/svg`) and **static** evaluation of the phase-driven

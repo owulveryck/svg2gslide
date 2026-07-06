@@ -5,20 +5,14 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
-	"google.golang.org/api/slides/v1"
-
+	"github.com/owulveryck/svg2gslide/internal/convert"
 	"github.com/owulveryck/svg2gslide/internal/gslide"
-	"github.com/owulveryck/svg2gslide/internal/mapper"
-	svgpkg "github.com/owulveryck/svg2gslide/internal/svg"
 )
 
 func main() {
@@ -68,33 +62,6 @@ func run(ctx context.Context, svgPath, presentationID, credentials, phase, outTh
 		}()
 		r = f
 	}
-	root, err := svgpkg.Parse(r)
-	if err != nil {
-		return fmt.Errorf("parsing %s: %w", label, err)
-	}
-	if root.Tag != "svg" {
-		return fmt.Errorf("%s: root element is <%s>, expected <svg>", label, root.Tag)
-	}
-
-	vb, err := svgpkg.ParseViewBox(root.Attr("viewBox"))
-	if err != nil {
-		// Fall back to width/height attributes.
-		w, h := root.FloatAttr("width", 0), root.FloatAttr("height", 0)
-		if w <= 0 || h <= 0 {
-			return fmt.Errorf("%s: no usable viewBox or width/height", label)
-		}
-		vb = svgpkg.ViewBox{W: w, H: h}
-	}
-
-	if phase == "" {
-		phase = root.Attr("data-active-phase")
-	}
-	var sheet *svgpkg.Stylesheet
-	if styleEl := root.Find("style"); styleEl != nil {
-		sheet = svgpkg.ParseStylesheet(styleEl.RawTextContent())
-	} else {
-		sheet = svgpkg.ParseStylesheet("")
-	}
 
 	if credentials == "" {
 		credentials = os.Getenv("SLIDES_CREDENTIALS")
@@ -119,44 +86,32 @@ func run(ctx context.Context, svgPath, presentationID, credentials, phase, outTh
 	if err != nil {
 		return err
 	}
-	scale := min(pageW/vb.W, pageH/vb.H)
-	offX := (pageW - vb.W*scale) / 2
-	offY := (pageH - vb.H*scale) / 2
 
-	slideID := "svg2gslide_" + randomSuffix()
-	m := mapper.New(mapper.Config{
-		SlideID:    slideID,
-		Phase:      phase,
-		Scale:      scale,
-		OffX:       offX,
-		OffY:       offY,
-		ViewBox:    vb,
-		FontFamily: fontFamily(root),
-		Verbose:    verbose,
-	}, sheet)
-	reqs, warnings := m.Map(root)
+	res, err := convert.Convert(convert.Input{
+		SVG:     r,
+		Label:   label,
+		PageW:   pageW,
+		PageH:   pageH,
+		Phase:   phase,
+		Verbose: verbose,
+	})
+	if err != nil {
+		return err
+	}
 	if verbose {
-		for _, w := range warnings {
+		for _, w := range res.Warnings {
 			fmt.Fprintln(os.Stderr, "  [approx]", w)
 		}
 	}
-	if len(reqs) == 0 {
-		return fmt.Errorf("nothing visible to convert (phase %q)", phase)
-	}
 
-	all := append([]*slides.Request{{CreateSlide: &slides.CreateSlideRequest{
-		ObjectId:             slideID,
-		SlideLayoutReference: &slides.LayoutReference{PredefinedLayout: "BLANK"},
-	}}}, reqs...)
-
-	if err := client.BatchUpdate(ctx, presentationID, all); err != nil {
+	if err := client.BatchUpdate(ctx, presentationID, res.Requests); err != nil {
 		return err
 	}
-	fmt.Printf("slide %s created (%d requests, phase %q)\n", slideID, len(all), phase)
-	fmt.Printf("https://docs.google.com/presentation/d/%s/edit#slide=id.%s\n", presentationID, slideID)
+	fmt.Printf("slide %s created (%d requests, phase %q)\n", res.SlideID, len(res.Requests), res.Phase)
+	fmt.Printf("https://docs.google.com/presentation/d/%s/edit#slide=id.%s\n", presentationID, res.SlideID)
 
 	if outThumbnail != "" {
-		if err := client.FetchSlideThumbnail(ctx, presentationID, slideID, outThumbnail); err != nil {
+		if err := client.FetchSlideThumbnail(ctx, presentationID, res.SlideID, outThumbnail); err != nil {
 			return err
 		}
 		fmt.Println("thumbnail:", outThumbnail)
@@ -168,20 +123,4 @@ func run(ctx context.Context, svgPath, presentationID, credentials, phase, outTh
 		fmt.Println("pdf:", exportPDF)
 	}
 	return nil
-}
-
-// fontFamily extracts the first font of the root font-family attribute.
-func fontFamily(root *svgpkg.Element) string {
-	ff := root.Attr("font-family")
-	if ff == "" {
-		return "Arial"
-	}
-	first := strings.SplitN(ff, ",", 2)[0]
-	return strings.Trim(strings.TrimSpace(first), `'"`)
-}
-
-func randomSuffix() string {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
 }

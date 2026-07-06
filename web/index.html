@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>svg2gslide — SVG to native Google Slides objects</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 640px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      line-height: 1.5;
+    }
+    h1 { font-size: 1.4rem; }
+    fieldset {
+      border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+      border-radius: 8px;
+      margin-bottom: 1rem;
+      padding: 0.75rem 1rem;
+    }
+    legend { font-weight: 600; padding: 0 0.4rem; }
+    label { display: block; margin: 0.5rem 0 0.2rem; font-size: 0.9rem; }
+    input[type="text"] {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 0.45rem;
+      border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+      border-radius: 6px;
+      font-family: inherit;
+    }
+    button {
+      padding: 0.5rem 1.1rem;
+      border-radius: 6px;
+      border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+      background: #1a73e8;
+      color: #fff;
+      font-size: 0.95rem;
+      cursor: pointer;
+      margin-top: 0.6rem;
+    }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    #status {
+      margin-top: 1rem;
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      background: color-mix(in srgb, currentColor 8%, transparent);
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 0.9rem;
+    }
+    #status.error { background: color-mix(in srgb, #d93025 15%, transparent); }
+    #status a { font-weight: 600; }
+    .hint { font-size: 0.8rem; opacity: 0.7; }
+    #warnings { font-size: 0.8rem; opacity: 0.8; margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+  <h1>svg2gslide</h1>
+  <p>Convert an SVG into <strong>native, editable Google Slides objects</strong>, appended
+     as a new slide to an existing presentation — entirely in your browser.</p>
+
+  <fieldset>
+    <legend>1 — Sign in</legend>
+    <label for="clientId">OAuth Client ID (Web application)</label>
+    <input type="text" id="clientId" placeholder="1234567890-xxxx.apps.googleusercontent.com">
+    <p class="hint">Created in Google Cloud Console → Credentials → OAuth client ID →
+       Web application, with this page's origin in “Authorized JavaScript origins”.
+       Stored locally in your browser.</p>
+    <button id="loginBtn" disabled>Sign in with Google</button>
+    <span id="loginState" class="hint"></span>
+  </fieldset>
+
+  <fieldset>
+    <legend>2 — Convert</legend>
+    <label for="svgFile">SVG file</label>
+    <input type="file" id="svgFile" accept=".svg,image/svg+xml">
+    <label for="presUrl">Target presentation URL (or ID)</label>
+    <input type="text" id="presUrl" placeholder="https://docs.google.com/presentation/d/…/edit">
+    <label for="phase">Phase (optional — defaults to the SVG's <code>data-active-phase</code>)</label>
+    <input type="text" id="phase" placeholder="">
+    <button id="convertBtn" disabled>Convert &amp; append slide</button>
+  </fieldset>
+
+  <div id="status">Loading WebAssembly module…</div>
+  <div id="warnings"></div>
+
+  <script src="wasm_exec.js"></script>
+  <script src="app.js"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer onload="gisLoaded()"></script>
+</body>
+</html>
