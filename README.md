@@ -72,8 +72,9 @@ Notes:
 
 - `web/main.wasm` is ~28 MB raw (~6 MB gzipped) — serve compressed in
   production.
-- Auth uses the Google Identity Services token flow, scope
-  `https://www.googleapis.com/auth/presentations` only. Tokens last ~1 h;
+- Auth uses the Google Identity Services token flow with the
+  `https://www.googleapis.com/auth/presentations` scope, plus
+  `userinfo.email` to display the signed-in account. Tokens last ~1 h;
   the page silently re-requests one on expiry.
 - Thumbnail/PDF export are CLI-only.
 

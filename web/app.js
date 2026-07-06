@@ -3,24 +3,28 @@
 // Bake a client ID in here for a deployed instance (client IDs are public,
 // not secrets); otherwise it is taken from the input, persisted in localStorage.
 const DEFAULT_CLIENT_ID = "";
-const SCOPE = "https://www.googleapis.com/auth/presentations";
+const SCOPE =
+  "https://www.googleapis.com/auth/presentations " +
+  "https://www.googleapis.com/auth/userinfo.email";
 const CLIENT_ID_KEY = "svg2gslide.clientId";
 
 const clientIdInput = document.getElementById("clientId");
 const loginBtn = document.getElementById("loginBtn");
 const loginState = document.getElementById("loginState");
 const svgFileInput = document.getElementById("svgFile");
+const dropZone = document.getElementById("dropZone");
 const presUrlInput = document.getElementById("presUrl");
-const phaseInput = document.getElementById("phase");
 const convertBtn = document.getElementById("convertBtn");
 const statusEl = document.getElementById("status");
 const warningsEl = document.getElementById("warnings");
 
 let gisReady = false;
 let wasmReady = false;
+let selectedFile = null;
 let tokenClient = null;
 let accessToken = null;
 let tokenExpiresAt = 0;
+let userEmail = null;
 // Set when a convert is waiting for a (re-)issued token.
 let pendingConvert = false;
 
@@ -32,9 +36,66 @@ function setStatus(msg, isError) {
 
 function updateButtons() {
   loginBtn.disabled = !(gisReady && clientIdInput.value.trim());
-  convertBtn.disabled = !(wasmReady && accessToken);
-  loginState.textContent = accessToken ? " Signed in ✓" : "";
+  convertBtn.disabled = !(wasmReady && accessToken && selectedFile);
+  if (accessToken) {
+    loginBtn.textContent = "Switch account";
+    loginBtn.classList.add("signedin");
+    loginState.textContent = userEmail ? ` Signed in as ${userEmail} ✓` : " Signed in ✓";
+  } else {
+    loginBtn.textContent = "Sign in with Google";
+    loginBtn.classList.remove("signedin");
+    loginState.textContent = "";
+  }
 }
+
+async function fetchUserEmail() {
+  try {
+    const resp = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+      headers: { Authorization: "Bearer " + accessToken },
+    });
+    if (resp.ok) {
+      userEmail = (await resp.json()).email || null;
+      updateButtons();
+    }
+  } catch (e) {
+    // Cosmetic only — the plain "Signed in ✓" stays.
+  }
+}
+
+// ---- SVG file selection (drag & drop or click-to-browse) --------------------
+
+function setFile(file) {
+  if (!file) return;
+  const looksSvg = file.type === "image/svg+xml" || /\.svg$/i.test(file.name);
+  if (!looksSvg) {
+    setStatus(`"${file.name}" doesn't look like an SVG file.`, true);
+    return;
+  }
+  selectedFile = file;
+  dropZone.classList.add("hasfile");
+  dropZone.textContent = "";
+  const name = document.createElement("strong");
+  name.textContent = file.name;
+  dropZone.append(name, ` (${Math.ceil(file.size / 1024)} KB) — drop or click to replace`);
+  updateButtons();
+}
+
+dropZone.addEventListener("click", () => svgFileInput.click());
+svgFileInput.addEventListener("change", () => setFile(svgFileInput.files[0]));
+
+dropZone.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  dropZone.classList.add("dragover");
+});
+dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+dropZone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dropZone.classList.remove("dragover");
+  setFile(e.dataTransfer.files[0]);
+});
+// A drop outside the zone must not make the browser navigate to the file.
+window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("drop", (e) => e.preventDefault());
 
 // ---- WebAssembly boot -------------------------------------------------------
 
@@ -86,6 +147,7 @@ function initTokenClient() {
       accessToken = resp.access_token;
       tokenExpiresAt = Date.now() + (Number(resp.expires_in) - 60) * 1000; // 60 s margin
       updateButtons();
+      fetchUserEmail();
       if (pendingConvert) {
         pendingConvert = false;
         runConvert();
@@ -98,7 +160,13 @@ function initTokenClient() {
 
 loginBtn.addEventListener("click", () => {
   initTokenClient();
-  tokenClient.requestAccessToken(); // consent popup on first grant
+  if (accessToken) {
+    // Already signed in: let the user pick another account.
+    userEmail = null;
+    tokenClient.requestAccessToken({ prompt: "select_account" });
+  } else {
+    tokenClient.requestAccessToken(); // consent popup on first grant
+  }
 });
 
 // Silent re-grant: no popup if the Google session is still active.
@@ -121,8 +189,7 @@ convertBtn.addEventListener("click", () => {
 
 async function runConvert() {
   warningsEl.textContent = "";
-  const file = svgFileInput.files[0];
-  if (!file) {
+  if (!selectedFile) {
     setStatus("Please choose an SVG file first.", true);
     return;
   }
@@ -132,15 +199,10 @@ async function runConvert() {
   }
 
   convertBtn.disabled = true;
-  setStatus("Converting " + file.name + "…");
+  setStatus("Converting " + selectedFile.name + "…");
   try {
-    const svgText = await file.text();
-    const res = await svg2gslideConvert(
-      svgText,
-      presUrlInput.value,
-      accessToken,
-      phaseInput.value.trim()
-    );
+    const svgText = await selectedFile.text();
+    const res = await svg2gslideConvert(svgText, presUrlInput.value, accessToken, "");
     const link = document.createElement("a");
     link.href = res.slideUrl;
     link.target = "_blank";
@@ -166,7 +228,7 @@ async function runConvert() {
       setStatus("Error: " + (err && err.message ? err.message : err), true);
     }
   } finally {
-    convertBtn.disabled = !(wasmReady && accessToken);
+    updateButtons();
   }
 }
 

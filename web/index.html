@@ -41,6 +41,7 @@
       margin-top: 0.6rem;
     }
     button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.signedin { background: #188038; }
     #status {
       margin-top: 1rem;
       padding: 0.75rem 1rem;
@@ -51,6 +52,22 @@
       font-size: 0.9rem;
     }
     #status.error { background: color-mix(in srgb, #d93025 15%, transparent); }
+    #dropZone {
+      margin-top: 0.5rem;
+      padding: 1.6rem 1rem;
+      border: 2px dashed color-mix(in srgb, currentColor 35%, transparent);
+      border-radius: 8px;
+      text-align: center;
+      cursor: pointer;
+      font-size: 0.9rem;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    #dropZone.dragover {
+      border-color: #1a73e8;
+      background: color-mix(in srgb, #1a73e8 12%, transparent);
+    }
+    #dropZone.hasfile { border-style: solid; }
+    #dropZone strong { color: #1a73e8; }
     #status a { font-weight: 600; }
     .hint { font-size: 0.8rem; opacity: 0.7; }
     #warnings { font-size: 0.8rem; opacity: 0.8; margin-top: 0.5rem; }
@@ -74,12 +91,10 @@
 
   <fieldset>
     <legend>2 — Convert</legend>
-    <label for="svgFile">SVG file</label>
-    <input type="file" id="svgFile" accept=".svg,image/svg+xml">
+    <div id="dropZone">Drag &amp; drop an SVG here, or <strong>click to browse</strong></div>
+    <input type="file" id="svgFile" accept=".svg,image/svg+xml" hidden>
     <label for="presUrl">Target presentation URL (or ID)</label>
     <input type="text" id="presUrl" placeholder="https://docs.google.com/presentation/d/…/edit">
-    <label for="phase">Phase (optional — defaults to the SVG's <code>data-active-phase</code>)</label>
-    <input type="text" id="phase" placeholder="">
     <button id="convertBtn" disabled>Convert &amp; append slide</button>
   </fieldset>
 
