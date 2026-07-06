@@ -98,6 +98,17 @@ func (m *Mapper) walk(e *svgpkg.Element, parent svgpkg.Matrix) {
 		m.mapPolygon(e, mat)
 	case "text":
 		m.mapText(e, mat)
+	case "svg":
+		// A nested <svg> establishes a new coordinate system.
+		vb, err := svgpkg.ParseViewBox(e.Attr("viewBox"))
+		nested := svgpkg.NestedSVGMatrix(
+			e.FloatAttr("x", 0), e.FloatAttr("y", 0),
+			e.FloatAttr("width", 0), e.FloatAttr("height", 0),
+			vb, err == nil, e.Attr("preserveAspectRatio"))
+		mat = mat.Mul(nested)
+		for _, c := range e.Children {
+			m.walk(c, mat)
+		}
 	default:
 		m.warnf("élément <%s> ignoré (non supporté)", e.Tag)
 	}
@@ -125,8 +136,9 @@ func (m *Mapper) lenEMU(v float64) float64 { return v * m.cfg.Scale }
 
 func (m *Mapper) mapRect(e *svgpkg.Element, mat svgpkg.Matrix) {
 	x, y := mat.Apply(e.FloatAttr("x", 0), e.FloatAttr("y", 0))
-	w := e.FloatAttr("width", 0)
-	h := e.FloatAttr("height", 0)
+	sx, sy := mat.ScaleFactors()
+	w := e.FloatAttr("width", 0) * sx
+	h := e.FloatAttr("height", 0) * sy
 	if w <= 0 || h <= 0 {
 		return
 	}
@@ -145,7 +157,7 @@ func (m *Mapper) mapRect(e *svgpkg.Element, mat svgpkg.Matrix) {
 	id := m.nextID()
 	ex, ey := m.toEMU(x, y)
 	m.createShape(id, shapeType, ex, ey, m.lenEMU(w), m.lenEMU(h), 0)
-	m.styleShape(id, e)
+	m.styleShape(id, e, mat)
 }
 
 func (m *Mapper) mapCircle(e *svgpkg.Element, mat svgpkg.Matrix) {
@@ -154,23 +166,25 @@ func (m *Mapper) mapCircle(e *svgpkg.Element, mat svgpkg.Matrix) {
 	if r <= 0 {
 		return
 	}
+	sx, sy := mat.ScaleFactors()
 	id := m.nextID()
-	ex, ey := m.toEMU(cx-r, cy-r)
-	m.createShape(id, "ELLIPSE", ex, ey, m.lenEMU(2*r), m.lenEMU(2*r), 0)
-	m.styleShape(id, e)
+	ex, ey := m.toEMU(cx-r*sx, cy-r*sy)
+	m.createShape(id, "ELLIPSE", ex, ey, m.lenEMU(2*r*sx), m.lenEMU(2*r*sy), 0)
+	m.styleShape(id, e, mat)
 }
 
 func (m *Mapper) mapEllipse(e *svgpkg.Element, mat svgpkg.Matrix) {
 	cx, cy := mat.Apply(e.FloatAttr("cx", 0), e.FloatAttr("cy", 0))
-	rx := e.FloatAttr("rx", 0)
-	ry := e.FloatAttr("ry", 0)
+	sx, sy := mat.ScaleFactors()
+	rx := e.FloatAttr("rx", 0) * sx
+	ry := e.FloatAttr("ry", 0) * sy
 	if rx <= 0 || ry <= 0 {
 		return
 	}
 	id := m.nextID()
 	ex, ey := m.toEMU(cx-rx, cy-ry)
 	m.createShape(id, "ELLIPSE", ex, ey, m.lenEMU(2*rx), m.lenEMU(2*ry), 0)
-	m.styleShape(id, e)
+	m.styleShape(id, e, mat)
 }
 
 // map3DBox recognizes a group drawn as an isometric box (several >=4-point
@@ -199,7 +213,7 @@ func (m *Mapper) map3DBox(e *svgpkg.Element, mat svgpkg.Matrix) bool {
 	id := m.nextID()
 	ex, ey := m.toEMU(minX, minY)
 	m.createShape(id, "CUBE", ex, ey, m.lenEMU(maxX-minX), m.lenEMU(maxY-minY), 0)
-	m.styleShape(id, faces[0])
+	m.styleShape(id, faces[0], mat)
 	m.warnf("groupe %q approximé par une forme CUBE", e.Attr("class"))
 
 	for _, c := range e.Children {
@@ -217,12 +231,12 @@ func (m *Mapper) mapPolygon(e *svgpkg.Element, mat svgpkg.Matrix) {
 	case len(pts) == 3:
 		m.mapTrianglePolygon(e, pts, mat)
 	case len(pts) == 4 && isAxisAlignedRect(pts):
-		minX, minY, w, h := bbox(pts)
-		x, y := mat.Apply(minX, minY)
+		tpts := applyAll(mat, pts)
+		minX, minY, w, h := bbox(tpts)
 		id := m.nextID()
-		ex, ey := m.toEMU(x, y)
+		ex, ey := m.toEMU(minX, minY)
 		m.createShape(id, "RECTANGLE", ex, ey, m.lenEMU(w), m.lenEMU(h), 0)
-		m.styleShape(id, e)
+		m.styleShape(id, e, mat)
 	default:
 		m.warnf("polygone à %d points ignoré (classe %q)", len(pts), e.Attr("class"))
 	}
@@ -231,6 +245,8 @@ func (m *Mapper) mapPolygon(e *svgpkg.Element, mat svgpkg.Matrix) {
 // mapTrianglePolygon maps a 3-point polygon (arrowhead chevrons) onto the
 // native TRIANGLE shape, rotated to match the pointing direction.
 func (m *Mapper) mapTrianglePolygon(e *svgpkg.Element, pts [][2]float64, mat svgpkg.Matrix) {
+	// Work in transformed space so scale and rotation are baked in.
+	pts = applyAll(mat, pts)
 	minX, minY, w, h := bbox(pts)
 	cx, cy := minX+w/2, minY+h/2
 	// The vertex farthest from the bbox center is the apex.
@@ -243,10 +259,9 @@ func (m *Mapper) mapTrianglePolygon(e *svgpkg.Element, pts [][2]float64, mat svg
 			apex = p
 		}
 	}
-	pointing := math.Atan2(apex[1]-cy, apex[0]-cx) // radians, local coords
+	pointing := math.Atan2(apex[1]-cy, apex[0]-cx)
 	// The Slides TRIANGLE points up (-y): rotate by pointing - (-90°).
-	extra := pointing + math.Pi/2
-	rot := mat.Rotation()*math.Pi/180 + extra
+	rot := pointing + math.Pi/2
 
 	// Extent along the pointing axis becomes the triangle height.
 	cosP, sinP := math.Cos(pointing), math.Sin(pointing)
@@ -258,8 +273,7 @@ func (m *Mapper) mapTrianglePolygon(e *svgpkg.Element, pts [][2]float64, mat svg
 			perp = math.Max(perp, math.Abs(-dx*sinP+dy*cosP))
 		}
 	}
-	tcx, tcy := mat.Apply(cx, cy)
-	ecx, ecy := m.toEMU(tcx, tcy)
+	ecx, ecy := m.toEMU(cx, cy)
 	wEMU, hEMU := m.lenEMU(perp), m.lenEMU(along)
 
 	id := m.nextID()
@@ -281,7 +295,16 @@ func (m *Mapper) mapTrianglePolygon(e *svgpkg.Element, pts [][2]float64, mat svg
 			},
 		},
 	}})
-	m.styleShape(id, e)
+	m.styleShape(id, e, mat)
+}
+
+func applyAll(mat svgpkg.Matrix, pts [][2]float64) [][2]float64 {
+	out := make([][2]float64, len(pts))
+	for i, p := range pts {
+		x, y := mat.Apply(p[0], p[1])
+		out[i] = [2]float64{x, y}
+	}
+	return out
 }
 
 func isAxisAlignedRect(pts [][2]float64) bool {
@@ -310,7 +333,7 @@ func bbox(pts [][2]float64) (minX, minY, w, h float64) {
 func (m *Mapper) mapLine(e *svgpkg.Element, mat svgpkg.Matrix) {
 	x1, y1 := mat.Apply(e.FloatAttr("x1", 0), e.FloatAttr("y1", 0))
 	x2, y2 := mat.Apply(e.FloatAttr("x2", 0), e.FloatAttr("y2", 0))
-	m.createLine(e, "STRAIGHT", x1, y1, x2, y2)
+	m.createLine(e, "STRAIGHT", x1, y1, x2, y2, mat)
 }
 
 func (m *Mapper) mapPath(e *svgpkg.Element, mat svgpkg.Matrix) {
@@ -395,7 +418,7 @@ func (m *Mapper) mapPath(e *svgpkg.Element, mat svgpkg.Matrix) {
 		x1, y1 := mat.Apply(p.p0[0], p.p0[1])
 		x2, y2 := mat.Apply(p.p1[0], p.p1[1])
 		withMarker := i == len(pieces)-1
-		m.createLinePiece(e, p.category, x1, y1, x2, y2, withMarker)
+		m.createLinePiece(e, p.category, x1, y1, x2, y2, withMarker, mat)
 	}
 }
 
@@ -492,16 +515,17 @@ func quarterArcPiece(p0, p1 [2]float64, rx, ry float64, sweep bool) (pathPiece, 
 // emitArc creates a native ARC shape covering one quadrant of the circle.
 func (m *Mapper) emitArc(e *svgpkg.Element, p pathPiece, mat svgpkg.Matrix) {
 	cx, cy := mat.Apply(p.cx, p.cy)
-	w := m.lenEMU(2 * p.r)
+	sx, sy := mat.ScaleFactors()
+	rx, ry := p.r*sx, p.r*sy
 	scaleX, scaleY := 1.0, 1.0
-	tx, ty := m.toEMU(cx-p.r, cy-p.r)
+	tx, ty := m.toEMU(cx-rx, cy-ry)
 	if p.flipX {
 		scaleX = -1
-		tx, _ = m.toEMU(cx+p.r, 0)
+		tx, _ = m.toEMU(cx+rx, 0)
 	}
 	if p.flipY {
 		scaleY = -1
-		_, ty = m.toEMU(0, cy+p.r)
+		_, ty = m.toEMU(0, cy+ry)
 	}
 	id := m.nextID()
 	m.reqs = append(m.reqs, &slides.Request{CreateShape: &slides.CreateShapeRequest{
@@ -509,7 +533,7 @@ func (m *Mapper) emitArc(e *svgpkg.Element, p pathPiece, mat svgpkg.Matrix) {
 		ShapeType: "ARC",
 		ElementProperties: &slides.PageElementProperties{
 			PageObjectId: m.cfg.SlideID,
-			Size:         sizeEMU(w, w),
+			Size:         sizeEMU(m.lenEMU(2*rx), m.lenEMU(2*ry)),
 			Transform: &slides.AffineTransform{
 				ScaleX: scaleX, ScaleY: scaleY,
 				TranslateX: tx, TranslateY: ty,
@@ -518,14 +542,14 @@ func (m *Mapper) emitArc(e *svgpkg.Element, p pathPiece, mat svgpkg.Matrix) {
 			},
 		},
 	}})
-	m.styleShape(id, e)
+	m.styleShape(id, e, mat)
 }
 
-func (m *Mapper) createLine(e *svgpkg.Element, category string, x1, y1, x2, y2 float64) {
-	m.createLinePiece(e, category, x1, y1, x2, y2, true)
+func (m *Mapper) createLine(e *svgpkg.Element, category string, x1, y1, x2, y2 float64, mat svgpkg.Matrix) {
+	m.createLinePiece(e, category, x1, y1, x2, y2, true, mat)
 }
 
-func (m *Mapper) createLinePiece(e *svgpkg.Element, category string, x1, y1, x2, y2 float64, withMarker bool) {
+func (m *Mapper) createLinePiece(e *svgpkg.Element, category string, x1, y1, x2, y2 float64, withMarker bool, mat svgpkg.Matrix) {
 	ex1, ey1 := m.toEMU(x1, y1)
 	ex2, ey2 := m.toEMU(x2, y2)
 	w := math.Abs(ex2 - ex1)
@@ -561,7 +585,7 @@ func (m *Mapper) createLinePiece(e *svgpkg.Element, category string, x1, y1, x2,
 		fields = append(fields, "lineFill.solidFill")
 	}
 	if sw := e.FloatAttr("stroke-width", 1); sw > 0 {
-		props.Weight = &slides.Dimension{Magnitude: m.lenEMU(sw), Unit: "EMU"}
+		props.Weight = &slides.Dimension{Magnitude: m.lenEMU(sw * avgScale(mat)), Unit: "EMU"}
 		fields = append(fields, "weight")
 	}
 	if e.Attr("stroke-dasharray") != "" {
@@ -595,14 +619,15 @@ func (m *Mapper) mapText(e *svgpkg.Element, mat svgpkg.Matrix) {
 		return
 	}
 	x, y := mat.Apply(e.FloatAttr("x", 0), e.FloatAttr("y", 0))
-	fontSize := e.FloatAttr("font-size", 10)
+	sx, sy := mat.ScaleFactors()
+	fontSize := e.FloatAttr("font-size", 10) * sy
 	anchor := e.Attr("text-anchor")
 	bold := e.Attr("font-weight") == "bold"
 	italic := e.Attr("font-style") == "italic"
 
 	// Rough width estimate to size the box; centered paragraphs make the
 	// slack symmetric so the estimate only needs to avoid wrapping.
-	est := estimateTextWidth(content, fontSize)
+	est := estimateTextWidth(content, e.FloatAttr("font-size", 10)) * sx
 	var centerX float64
 	switch anchor {
 	case "middle":
@@ -710,8 +735,15 @@ func (m *Mapper) createShape(id, shapeType string, x, y, w, h, rotDeg float64) {
 	}})
 }
 
+// avgScale is the pragmatic single factor used for stroke widths under a
+// possibly non-uniform scale (exact when the scale is uniform).
+func avgScale(mat svgpkg.Matrix) float64 {
+	sx, sy := mat.ScaleFactors()
+	return (sx + sy) / 2
+}
+
 // styleShape applies fill and outline from the SVG presentation attributes.
-func (m *Mapper) styleShape(id string, e *svgpkg.Element) {
+func (m *Mapper) styleShape(id string, e *svgpkg.Element, mat svgpkg.Matrix) {
 	props := &slides.ShapeProperties{}
 	var fields []string
 
@@ -734,7 +766,7 @@ func (m *Mapper) styleShape(id string, e *svgpkg.Element) {
 	} else if c, ok := parseColor(stroke); ok {
 		props.Outline = &slides.Outline{
 			OutlineFill: &slides.OutlineFill{SolidFill: &slides.SolidFill{Color: c, Alpha: strokeAlpha(e)}},
-			Weight:      &slides.Dimension{Magnitude: m.lenEMU(e.FloatAttr("stroke-width", 1)), Unit: "EMU"},
+			Weight:      &slides.Dimension{Magnitude: m.lenEMU(e.FloatAttr("stroke-width", 1) * avgScale(mat)), Unit: "EMU"},
 		}
 		fields = append(fields, "outline.outlineFill.solidFill", "outline.weight")
 		if e.Attr("stroke-dasharray") != "" {

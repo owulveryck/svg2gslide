@@ -1,8 +1,8 @@
 # svg2gslide
 
-Convertit un fichier SVG en une slide **native** Google Slides (formes, lignes
-et zones de texte éditables — pas une image), ajoutée à la fin d'une
-présentation existante.
+Converts an SVG file into a **native** Google Slides slide (editable shapes,
+lines and text boxes — not an image), appended to the end of an existing
+presentation.
 
 ## Usage
 
@@ -13,52 +13,58 @@ go run . -svg testdata/sdlc-phase-8.svg \
   -v
 ```
 
-Flags :
+The SVG can also be piped on stdin:
+
+```sh
+cat testdata/sdlc-phase-8.svg | go run . -presentation <PRESENTATION_ID>
+```
+
+Flags:
 
 | Flag | Description |
 |---|---|
-| `-svg` | fichier SVG d'entrée (requis) |
-| `-presentation` | ID de la présentation cible (requis) |
-| `-credentials` | JSON client OAuth ou service account (défaut : `$SLIDES_CREDENTIALS`, puis `~/.config/gcloud/slideappscripter-client.json`) |
-| `-phase` | force la phase active (défaut : attribut `data-active-phase` du SVG) |
-| `-out-thumbnail` | télécharge le thumbnail PNG de la nouvelle slide |
-| `-export-pdf` | exporte la présentation complète en PDF |
-| `-v` | affiche les éléments ignorés/approximés |
+| `-svg` | input SVG file (default: stdin) |
+| `-presentation` | target presentation ID (required) |
+| `-credentials` | OAuth client or service account JSON (default: `$SLIDES_CREDENTIALS`, then `~/.config/gcloud/slideappscripter-client.json`) |
+| `-phase` | force the active phase (default: the SVG's `data-active-phase` attribute) |
+| `-out-thumbnail` | download the new slide's PNG thumbnail to this path |
+| `-export-pdf` | export the whole presentation as PDF |
+| `-v` | log skipped/approximated elements |
 
-Utilitaire d'entretien :
+Maintenance utility:
 
 ```sh
 go run ./cmd/presctl -presentation <ID> -delete-slide <SLIDE_OBJECT_ID> -export-pdf /tmp/deck.pdf
 ```
 
-## Fonctionnement
+## How it works
 
-1. Parsing du SVG (`internal/svg`) et évaluation **statique** du CSS de
-   visibilité par phase (`[data-active-phase="N"]`) — les animations
-   (`@keyframes`, dots, highlights) sont ignorées.
-2. Mapping vers des requêtes `batchUpdate` (`internal/mapper`) :
-   - `rect` → RECTANGLE / ROUND_RECTANGLE, `circle` → ELLIPSE ;
-   - `line` → connecteur STRAIGHT (flèche si `marker-end`) ;
-   - quarts de cercle (`A` alignés sur les axes) → forme **ARC** native,
-     orientée par quadrant via les flips scaleX/scaleY ;
-   - courbes quadratiques (`Q`) → connecteur CURVED, scindé au point milieu
-     si la courbe est profonde ;
-   - polygones à 3 points (chevrons) → TRIANGLE avec rotation ;
-   - groupes « boîte 3D » (≥3 polygones) → forme CUBE ;
-   - `text` → TEXT_BOX centrée (police, taille, gras/italique, couleur).
-3. Une seule slide BLANK est créée puis remplie en un `batchUpdate` (chunké
-   au-delà de 400 requêtes).
+1. SVG parsing (`internal/svg`) and **static** evaluation of the phase-driven
+   visibility CSS (`[data-active-phase="N"]`) — animations (`@keyframes`,
+   dots, highlights) are ignored.
+2. Mapping to `batchUpdate` requests (`internal/mapper`):
+   - `rect` → RECTANGLE / ROUND_RECTANGLE, `circle` → ELLIPSE;
+   - `line` → STRAIGHT connector (arrow if `marker-end`);
+   - axis-aligned quarter arcs (`A`) → native **ARC** shape, oriented per
+     quadrant via scaleX/scaleY flips;
+   - quadratic curves (`Q`) → CURVED connector, split at the midpoint when
+     the curve is deep;
+   - 3-point polygons (chevrons) → TRIANGLE with rotation;
+   - "3D box" groups (≥3 polygons) → CUBE shape;
+   - `text` → centered TEXT_BOX (font, size, bold/italic, color).
+3. A single BLANK slide is created and then filled in one `batchUpdate`
+   (chunked past 400 requests).
 
-## Approximations connues
+## Known approximations
 
-- Chemins fermés à courbes cubiques (nuages…) : ignorés (avec warning `-v`).
-- Halo « surligneur » des tspans : rendu en gras simple.
-- La police du SVG (ex. `Outfit`) doit exister côté Google Fonts.
+- Closed cubic-curve paths (clouds, etc.): ignored (warning under `-v`).
+- Highlighter halo around tspans: rendered as plain bold.
+- The SVG's font (e.g. `Outfit`) must exist in Google Fonts.
 
-## Validation visuelle
+## Visual validation
 
-`rsvg-convert` rend ces SVG **blancs** (librsvg n'applique pas le CSS de
-phase). Pour une référence fidèle, utiliser Chrome headless :
+`rsvg-convert` renders these SVGs **blank** (librsvg doesn't apply the
+phase CSS). For a faithful reference, use headless Chrome:
 
 ```sh
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless \
@@ -66,4 +72,4 @@ phase). Pour une référence fidèle, utiliser Chrome headless :
   "file://$PWD/testdata/sdlc-phase-8.svg"
 ```
 
-puis comparer avec le thumbnail produit par `-out-thumbnail`.
+then compare with the thumbnail produced by `-out-thumbnail`.

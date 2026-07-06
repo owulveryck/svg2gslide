@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +23,7 @@ import (
 
 func main() {
 	var (
-		svgPath      = flag.String("svg", "", "input SVG file (required)")
+		svgPath      = flag.String("svg", "", "input SVG file (default: stdin)")
 		presentation = flag.String("presentation", "", "target Google Slides presentation ID (required)")
 		credentials  = flag.String("credentials", "", "OAuth client or service account JSON (default: $SLIDES_CREDENTIALS)")
 		phase        = flag.String("phase", "", "active phase (default: the SVG's data-active-phase attribute)")
@@ -32,9 +33,16 @@ func main() {
 	)
 	flag.Parse()
 
-	if *svgPath == "" || *presentation == "" {
+	if *presentation == "" {
 		flag.Usage()
 		os.Exit(2)
+	}
+	if *svgPath == "" {
+		info, err := os.Stdin.Stat()
+		if err != nil || info.Mode()&os.ModeCharDevice != 0 {
+			flag.Usage()
+			os.Exit(2)
+		}
 	}
 	if err := run(context.Background(), *svgPath, *presentation, *credentials, *phase, *outThumbnail, *exportPDF, *verbose); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -43,17 +51,29 @@ func main() {
 }
 
 func run(ctx context.Context, svgPath, presentationID, credentials, phase, outThumbnail, exportPDF string, verbose bool) error {
-	f, err := os.Open(svgPath)
-	if err != nil {
-		return err
+	var (
+		r     io.Reader
+		label = svgPath
+	)
+	if svgPath == "" {
+		r = os.Stdin
+		label = "<stdin>"
+	} else {
+		f, err := os.Open(svgPath)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			_ = f.Close()
+		}()
+		r = f
 	}
-	root, err := svgpkg.Parse(f)
-	_ = f.Close()
+	root, err := svgpkg.Parse(r)
 	if err != nil {
-		return fmt.Errorf("parsing %s: %w", svgPath, err)
+		return fmt.Errorf("parsing %s: %w", label, err)
 	}
 	if root.Tag != "svg" {
-		return fmt.Errorf("%s: root element is <%s>, expected <svg>", svgPath, root.Tag)
+		return fmt.Errorf("%s: root element is <%s>, expected <svg>", label, root.Tag)
 	}
 
 	vb, err := svgpkg.ParseViewBox(root.Attr("viewBox"))
@@ -61,7 +81,7 @@ func run(ctx context.Context, svgPath, presentationID, credentials, phase, outTh
 		// Fall back to width/height attributes.
 		w, h := root.FloatAttr("width", 0), root.FloatAttr("height", 0)
 		if w <= 0 || h <= 0 {
-			return fmt.Errorf("%s: no usable viewBox or width/height", svgPath)
+			return fmt.Errorf("%s: no usable viewBox or width/height", label)
 		}
 		vb = svgpkg.ViewBox{W: w, H: h}
 	}

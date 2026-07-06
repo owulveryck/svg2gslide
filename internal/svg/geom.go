@@ -62,6 +62,34 @@ func (m Matrix) Rotation() float64 {
 	return math.Atan2(m.B, m.A) * 180 / math.Pi
 }
 
+// ScaleFactors returns the length scaling applied by the matrix along the
+// local x and y axes (robust to rotation; ignores skew).
+func (m Matrix) ScaleFactors() (sx, sy float64) {
+	return math.Hypot(m.A, m.B), math.Hypot(m.C, m.D)
+}
+
+// NestedSVGMatrix returns the coordinate transform established by a nested
+// <svg x y width height viewBox> element. Without a viewBox it is a pure
+// translation. A preserveAspectRatio other than "none" is treated as the SVG
+// default xMidYMid meet (uniform min scale, centered); "none" stretches
+// non-uniformly.
+func NestedSVGMatrix(x, y, w, h float64, vb ViewBox, hasViewBox bool, preserveAspectRatio string) Matrix {
+	m := Matrix{A: 1, D: 1, E: x, F: y}
+	if !hasViewBox || vb.W <= 0 || vb.H <= 0 {
+		return m
+	}
+	sx, sy := 1.0, 1.0
+	if w > 0 && h > 0 {
+		sx, sy = w/vb.W, h/vb.H
+		if strings.TrimSpace(preserveAspectRatio) != "none" { // spec default: xMidYMid meet
+			s := math.Min(sx, sy)
+			m = m.Mul(Matrix{A: 1, D: 1, E: (w - vb.W*s) / 2, F: (h - vb.H*s) / 2})
+			sx, sy = s, s
+		}
+	}
+	return m.Mul(Matrix{A: sx, D: sy}).Mul(Matrix{A: 1, D: 1, E: -vb.X, F: -vb.Y})
+}
+
 var transformRe = regexp.MustCompile(`(translate|rotate|scale|matrix)\s*\(([^)]*)\)`)
 
 // ParseTransform parses an SVG transform attribute (translate, rotate, scale,
