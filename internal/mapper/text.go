@@ -12,18 +12,42 @@ import (
 	svgpkg "github.com/owulveryck/svg2gslide/internal/svg"
 )
 
-// Google Slides text layout metrics, measured on rendered thumbnails
-// (Arial, which Slides renders with its true font metrics):
+// Google Slides text layout metrics (Arial), measured on the baselines of
+// an exported PDF (see cmd/presctl -dump and the calibration notes in the
+// README):
 //   - a TEXT_BOX has a fixed 0.1" inset on every side;
-//   - with lineSpacing p (fraction of single), the first baseline sits
-//     slidesAscent·size·min(1,p) below the top inset;
-//   - consecutive baselines are slidesLineHeight·size·p apart;
+//   - a line of size s at line spacing p occupies slidesLineHeight·s·p;
+//     between two lines the pitch is slidesPitchDescent·prev +
+//     slidesPitchAscent·cur at single spacing; extra spacing (p>1) is added
+//     below the previous line, reduced spacing (p<1) is removed 80% above
+//     the current line and 20% below the previous one;
+//   - the first baseline sits slidesAscent·s − 0.4pt below the top inset,
+//     minus the 80% share of the reduction when p<1;
 //   - spaceAbove also applies to the first paragraph.
 const (
-	slidesAscent     = 0.944
-	slidesLineHeight = 1.197
-	slidesDescent    = 0.25
+	slidesLineHeight   = 1.2
+	slidesPitchAscent  = 0.97
+	slidesPitchDescent = slidesLineHeight - slidesPitchAscent
+	slidesAscent       = 0.955
+	slidesAscentOffset = 0.4 * emuPerPt
+	slidesReduceAbove  = 0.8
+	slidesDescent      = 0.25
+	// Glyph origins land 0.45pt left of the 0.1" inset (the effective
+	// horizontal inset is 6.75pt, i.e. 9px at 96dpi).
+	textOriginShiftEMU = 0.45 * emuPerPt
+	// maxLineSpacing caps the paragraph line spacing (Slides' default).
+	maxLineSpacing = 1.15
 )
+
+// firstBaselineOffset is the distance (EMU) from the top text inset to the
+// first baseline for a first line of size s (EMU) at line spacing p.
+func firstBaselineOffset(s, p float64) float64 {
+	off := slidesAscent*s - slidesAscentOffset
+	if p < 1 {
+		off -= slidesReduceAbove * slidesLineHeight * (1 - p) * s
+	}
+	return off
+}
 
 // textRun is a piece of text sharing one style source element.
 type textRun struct {
@@ -107,7 +131,7 @@ func normalizeRuns(l *textLine) {
 	lastSpace := true // drops leading whitespace
 	for _, r := range l.runs {
 		var b strings.Builder
-		for _, c := range r.text {
+		for _, c := range applyTextTransform(r.text, r.el.Inherited("text-transform"), lastSpace) {
 			if c == ' ' || c == '\t' || c == '\n' || c == '\r' { // XML whitespace only
 				if !lastSpace {
 					b.WriteByte(' ')
@@ -132,6 +156,32 @@ func normalizeRuns(l *textLine) {
 		out = out[:len(out)-1]
 	}
 	l.runs = out
+}
+
+// applyTextTransform applies the CSS text-transform property. atWordStart
+// tells whether s begins a new word (for capitalize).
+func applyTextTransform(s, tt string, atWordStart bool) string {
+	switch strings.TrimSpace(tt) {
+	case "uppercase":
+		return strings.ToUpper(s)
+	case "lowercase":
+		return strings.ToLower(s)
+	case "capitalize":
+		rs := []rune(s)
+		start := atWordStart
+		for i, c := range rs {
+			if unicode.IsSpace(c) {
+				start = true
+				continue
+			}
+			if start {
+				rs[i] = unicode.ToUpper(c)
+			}
+			start = false
+		}
+		return string(rs)
+	}
+	return s
 }
 
 // firstNum parses the first value of a (possibly list-valued) length
@@ -192,13 +242,46 @@ func (m *Mapper) mapText(e *svgpkg.Element, mat svgpkg.Matrix) {
 	if len(lines) == 0 {
 		return
 	}
+	var minW []float64
+	if tl := e.FloatAttr("textLength", 0); tl > 0 && len(lines) == 1 {
+		minW = []float64{tl}
+	}
+	m.layoutText(e, lines, e.Inherited("text-anchor"), minW, mat)
+}
+
+// naturalPitch models the distance between the baselines of two
+// consecutive Slides paragraphs of font sizes prev and cur (same unit as
+// the result) at line spacing p (fraction of single).
+func naturalPitch(p, prev, cur float64) float64 {
+	base := slidesPitchDescent*prev + slidesPitchAscent*cur
+	if p >= 1 {
+		return base + (p-1)*slidesLineHeight*prev
+	}
+	return base - (1-p)*slidesLineHeight*((1-slidesReduceAbove)*prev+slidesReduceAbove*cur)
+}
+
+// spacingFor inverts naturalPitch: the line spacing making the pitch
+// between sizes prev and cur equal to d.
+func spacingFor(d, prev, cur float64) float64 {
+	base := slidesPitchDescent*prev + slidesPitchAscent*cur
+	if d >= base {
+		return 1 + (d-base)/(slidesLineHeight*prev)
+	}
+	return 1 - (base-d)/(slidesLineHeight*((1-slidesReduceAbove)*prev+slidesReduceAbove*cur))
+}
+
+// layoutText emits one TEXT_BOX holding the given lines (paragraphs),
+// positioned so every baseline lands on its SVG baseline. anchor is the
+// SVG text-anchor shared by the lines (each line x is its anchor point);
+// minW optionally gives a known minimum width per line (textLength).
+// e provides the base style and the opacity context.
+func (m *Mapper) layoutText(e *svgpkg.Element, lines []*textLine, anchor string, minW []float64, mat svgpkg.Matrix) {
 	base := m.styleOf(e)
 	_, s := mat.ScaleFactors() // local → SVG user units (vertical)
 	if s <= 0 {
 		return
 	}
 	k := m.cfg.Scale * s // EMU per local unit
-	anchor := e.Inherited("text-anchor")
 
 	// Per-line metrics in local units.
 	lineSize := make([]float64, len(lines))
@@ -211,34 +294,46 @@ func (m *Mapper) mapText(e *svgpkg.Element, mat svgpkg.Matrix) {
 			lineSize[i] = math.Max(lineSize[i], st.size)
 			lineW[i] += textWidth(r.text, st)
 		}
-	}
-	if tl := e.FloatAttr("textLength", 0); tl > 0 && len(lines) == 1 {
-		lineW[0] = tl
+		if i < len(minW) && minW[i] > lineW[i] {
+			lineW[i] = minW[i]
+		}
 	}
 	maxW := 0.0
 	for _, w := range lineW {
 		maxW = math.Max(maxW, w)
 	}
 
-	// Vertical layout (EMU). f is the first line font size.
+	// Vertical layout (EMU). A single line spacing p is chosen as the
+	// tightest pitch; larger pitches are made up with spaceAbove.
 	f := lineSize[0] * k
 	p := 1.0
 	var pitches []float64 // EMU between consecutive baselines
-	minPitch := math.Inf(1)
+	if len(lines) > 1 {
+		p = math.Inf(1)
+		for i := 1; i < len(lines); i++ {
+			d := (lines[i].baseline - lines[i-1].baseline) * k
+			pitches = append(pitches, d)
+			p = math.Min(p, spacingFor(d, lineSize[i-1]*k, lineSize[i]*k))
+		}
+		if p <= 0.05 || math.IsInf(p, 0) {
+			p = 1
+		}
+		// Loose pitches are rendered as spaceAbove rather than a huge
+		// line spacing, so that text typed later keeps a sane spacing.
+		p = math.Min(p, maxLineSpacing)
+		p = math.Round(p*1000) / 1000
+	}
+	extras := make([]float64, len(lines)) // spaceAbove per line, EMU
 	for i := 1; i < len(lines); i++ {
-		d := (lines[i].baseline - lines[i-1].baseline) * k
-		pitches = append(pitches, d)
-		minPitch = math.Min(minPitch, d)
+		extras[i] = math.Max(0, pitches[i-1]-naturalPitch(p, lineSize[i-1]*k, lineSize[i]*k))
 	}
-	if len(pitches) > 0 && minPitch > 0 {
-		p = minPitch / (slidesLineHeight * f)
-	}
-	firstBaseline := textInsetEMU + slidesAscent*f*math.Min(1, p)
+	firstBaseline := textInsetEMU + firstBaselineOffset(f, p)
 	total := 0.0
 	for _, d := range pitches {
 		total += d
 	}
-	hEMU := firstBaseline + total + slidesDescent*f*math.Max(1, p) + textInsetEMU
+	fl := lineSize[len(lines)-1] * k
+	hEMU := firstBaseline + total + slidesDescent*fl*math.Max(1, p) + textInsetEMU
 
 	// Horizontal layout (EMU). Generous slack: SVG lines never wrap, and
 	// the paragraph alignment keeps the anchored edge exact.
@@ -257,10 +352,10 @@ func (m *Mapper) mapText(e *svgpkg.Element, mat svgpkg.Matrix) {
 		bx = -wEMU / 2
 	case "end":
 		alignment = "END"
-		bx = -wEMU + textInsetEMU
+		bx = -wEMU + textInsetEMU + textOriginShiftEMU
 	default:
 		ax = xMin
-		bx = -textInsetEMU
+		bx = -textInsetEMU + textOriginShiftEMU
 	}
 	by := -firstBaseline
 
@@ -315,7 +410,7 @@ func (m *Mapper) mapText(e *svgpkg.Element, mat svgpkg.Matrix) {
 		ObjectId: id,
 		Style: &slides.ParagraphStyle{
 			Alignment:       alignment,
-			LineSpacing:     math.Round(p*1000) / 10,
+			LineSpacing:     math.Round(p*1000) / 10, // p already rounded to 1/1000
 			SpaceAbove:      &slides.Dimension{Magnitude: 0, Unit: "PT", ForceSendFields: []string{"Magnitude"}},
 			SpaceBelow:      &slides.Dimension{Magnitude: 0, Unit: "PT", ForceSendFields: []string{"Magnitude"}},
 			IndentStart:     &slides.Dimension{Magnitude: 0, Unit: "PT", ForceSendFields: []string{"Magnitude"}},
@@ -329,11 +424,9 @@ func (m *Mapper) mapText(e *svgpkg.Element, mat svgpkg.Matrix) {
 		n := len(utf16.Encode([]rune(l.text())))
 		ps := &slides.ParagraphStyle{}
 		var fields []string
-		if i > 0 {
-			if extra := pitches[i-1] - minPitch; extra > 1000 {
-				ps.SpaceAbove = &slides.Dimension{Magnitude: extra / emuPerPt, Unit: "PT"}
-				fields = append(fields, "spaceAbove")
-			}
+		if extra := extras[i]; extra > 1000 {
+			ps.SpaceAbove = &slides.Dimension{Magnitude: math.Round(extra/emuPerPt*100) / 100, Unit: "PT"}
+			fields = append(fields, "spaceAbove")
 		}
 		if alignment == "START" {
 			if ind := (l.x - xMin) * k; ind > 1000 {
@@ -479,20 +572,59 @@ func (m *Mapper) gradientText(id string, e *svgpkg.Element, lines []*textLine, l
 // font-family, generic CSS families mapped to stock fonts, else the
 // document default.
 func (m *Mapper) resolveFont(e *svgpkg.Element) string {
-	f := strings.TrimSpace(e.Inherited("font-family"))
-	if i := strings.IndexByte(f, ','); i >= 0 {
-		f = strings.TrimSpace(f[:i])
+	list := strings.TrimSpace(e.Inherited("font-family"))
+	if list == "" {
+		return mapFontName(m.cfg.FontFamily)
 	}
-	f = strings.Trim(f, `'"`)
-	switch strings.ToLower(f) {
-	case "":
-		return m.cfg.FontFamily
-	case "sans-serif", "helvetica", "system-ui":
-		return "Arial"
-	case "serif":
-		return "Times New Roman"
-	case "monospace":
-		return "Courier New"
+	fallback := ""
+	for f := range strings.SplitSeq(list, ",") {
+		f = strings.Trim(strings.TrimSpace(f), `'"`)
+		if f == "" {
+			continue
+		}
+		if sub, ok := platformFonts[strings.ToLower(f)]; ok {
+			// Not available in Slides: remember its substitute and keep
+			// looking for a real family further down the list.
+			if fallback == "" {
+				fallback = sub
+			}
+			continue
+		}
+		// Real family (a Google Font Slides can load) or a CSS generic.
+		return mapFontName(f)
+	}
+	if fallback == "" {
+		return mapFontName(m.cfg.FontFamily)
+	}
+	return fallback
+}
+
+// platformFonts are OS/UI fonts that Google Slides doesn't have, with the
+// metric-compatible substitute used when nothing better follows them in the
+// font-family list.
+var platformFonts = map[string]string{
+	"helvetica neue": "Arial", "helvetica": "Arial",
+	"-apple-system": "Arial", "blinkmacsystemfont": "Arial", "system-ui": "Arial",
+	"segoe ui": "Arial", "ui-sans-serif": "Arial", "sf pro display": "Arial",
+	"sf pro text": "Arial", ".sfnstext": "Arial",
+	"menlo": "Roboto Mono", "consolas": "Roboto Mono", "sf mono": "Roboto Mono",
+	"monaco": "Roboto Mono", "ui-monospace": "Roboto Mono",
+}
+
+// genericFonts maps CSS generic families to stock Slides fonts.
+var genericFonts = map[string]string{
+	"sans-serif": "Arial", "serif": "Times New Roman", "monospace": "Courier New",
+	"cursive": "Comic Sans MS", "fantasy": "Impact", "times": "Times New Roman",
+	"courier": "Courier New",
+}
+
+func mapFontName(f string) string {
+	l := strings.ToLower(strings.TrimSpace(f))
+	if name, ok := genericFonts[l]; ok {
+		return name
+	}
+	if name, ok := platformFonts[l]; ok {
+		return name
 	}
 	return f
 }

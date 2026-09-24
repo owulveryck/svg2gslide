@@ -43,6 +43,11 @@ type Mapper struct {
 	grads  map[string]*gradient
 	pageBG rgba // current page background (composited full-page layers)
 	bgSet  bool
+
+	textBlocks map[*svgpkg.Element]*textBlock // group leader → grouped lines
+	textSkip   map[*svgpkg.Element]bool       // texts absorbed by a group
+
+	images []EmbeddedImage
 }
 
 // New creates a Mapper.
@@ -56,6 +61,7 @@ func New(cfg Config, sheet *svgpkg.Stylesheet) *Mapper {
 // Map converts the SVG root into Slides requests targeting cfg.SlideID.
 func (m *Mapper) Map(root *svgpkg.Element) ([]*slides.Request, []string) {
 	m.grads = collectGradients(root)
+	m.planTextGroups(root)
 	for _, c := range root.Children {
 		m.walk(c, svgpkg.Identity())
 	}
@@ -113,7 +119,15 @@ func (m *Mapper) walk(e *svgpkg.Element, parent svgpkg.Matrix) {
 	case "polygon":
 		m.mapPolygon(e, mat)
 	case "text":
-		m.mapText(e, mat)
+		switch {
+		case m.textSkip[e]:
+		case m.textBlocks[e] != nil:
+			m.mapTextBlock(e, m.textBlocks[e], mat)
+		default:
+			m.mapText(e, mat)
+		}
+	case "image":
+		m.mapImage(e, mat)
 	case "svg":
 		// A nested <svg> establishes a new coordinate system.
 		vb, err := svgpkg.ParseViewBox(e.Attr("viewBox"))
@@ -683,19 +697,43 @@ func (m *Mapper) mapPath(e *svgpkg.Element, mat svgpkg.Matrix) {
 		m.warnf("path fermé %q approximé par sa boîte englobante", pathLabel(e))
 		return
 	}
-	if len(pieces) > 1 {
-		m.warnf("path %q approximé par %d éléments", pathLabel(e), len(pieces))
-	}
+	pieces = mergeCollinear(pieces)
+	var ids []string
 	for i, p := range pieces {
 		if p.arc {
-			m.emitArc(e, p, mat)
+			ids = append(ids, m.emitArc(e, p, mat))
 			continue
 		}
 		x1, y1 := mat.Apply(p.p0[0], p.p0[1])
 		x2, y2 := mat.Apply(p.p1[0], p.p1[1])
-		withMarker := i == len(pieces)-1
-		m.createLinePiece(e, p.category, x1, y1, x2, y2, withMarker, mat)
+		// Markers: the start arrow on the first piece, the end arrow on
+		// the last one.
+		ids = append(ids, m.createLinePieceMarkers(e, p.category, x1, y1, x2, y2, i == 0, i == len(pieces)-1, mat))
 	}
+	if len(ids) > 1 {
+		// One path = one editable object.
+		m.reqs = append(m.reqs, &slides.Request{GroupObjects: &slides.GroupObjectsRequest{
+			GroupObjectId:     m.nextID(),
+			ChildrenObjectIds: ids,
+		}})
+	}
+}
+
+// mergeCollinear joins consecutive straight pieces that continue in the
+// same direction (flattening often yields such runs).
+func mergeCollinear(pieces []pathPiece) []pathPiece {
+	var out []pathPiece
+	for _, p := range pieces {
+		if n := len(out); n > 0 && p.category == "STRAIGHT" && !p.arc {
+			q := &out[n-1]
+			if q.category == "STRAIGHT" && !q.arc && q.p1 == p.p0 && distToLine(p.p0, q.p0, p.p1) < 0.25 {
+				q.p1 = p.p1
+				continue
+			}
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // pathPiece is one drawable fragment of a path: either a connector between
@@ -708,6 +746,7 @@ type pathPiece struct {
 	arc          bool
 	cx, cy       float64
 	r            float64
+	rx, ry       float64 // elliptical radii (0: circular, use r)
 	flipX, flipY bool
 }
 
@@ -721,47 +760,14 @@ func pathLabel(e *svgpkg.Element) string {
 	return ""
 }
 
-// quadPieces approximates one quadratic bezier. A shallow curve becomes a
-// single CURVED connector; a deep one (control point far from the chord) is
-// split at the true curve midpoint so the bow is preserved.
-func quadPieces(p0, ctrl, p1 [2]float64) []pathPiece {
-	mid := [2]float64{(p0[0] + 2*ctrl[0] + p1[0]) / 4, (p0[1] + 2*ctrl[1] + p1[1]) / 4}
-	chordMid := [2]float64{(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2}
-	dev := math.Hypot(mid[0]-chordMid[0], mid[1]-chordMid[1])
-	chord := math.Hypot(p1[0]-p0[0], p1[1]-p0[1])
-	if chord > 0 && dev > 0.2*chord {
-		return []pathPiece{
-			{category: "CURVED", p0: p0, p1: mid},
-			{category: "CURVED", p0: mid, p1: p1},
-		}
-	}
-	return []pathPiece{{category: "CURVED", p0: p0, p1: p1}}
-}
-
-// cubicPieces approximates one cubic bezier with the same strategy as
-// quadPieces, splitting at the true curve midpoint when the bow is deep.
-func cubicPieces(p0, c1, c2, p1 [2]float64) []pathPiece {
-	mid := [2]float64{
-		(p0[0] + 3*c1[0] + 3*c2[0] + p1[0]) / 8,
-		(p0[1] + 3*c1[1] + 3*c2[1] + p1[1]) / 8,
-	}
-	chordMid := [2]float64{(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2}
-	dev := math.Hypot(mid[0]-chordMid[0], mid[1]-chordMid[1])
-	chord := math.Hypot(p1[0]-p0[0], p1[1]-p0[1])
-	if chord > 0 && dev > 0.2*chord {
-		return []pathPiece{
-			{category: "CURVED", p0: p0, p1: mid},
-			{category: "CURVED", p0: mid, p1: p1},
-		}
-	}
-	return []pathPiece{{category: "CURVED", p0: p0, p1: p1}}
-}
-
 // emitArc creates a native ARC shape covering one quadrant of the circle.
-func (m *Mapper) emitArc(e *svgpkg.Element, p pathPiece, mat svgpkg.Matrix) {
+func (m *Mapper) emitArc(e *svgpkg.Element, p pathPiece, mat svgpkg.Matrix) string {
 	cx, cy := mat.Apply(p.cx, p.cy)
 	sx, sy := mat.ScaleFactors()
 	rx, ry := p.r*sx, p.r*sy
+	if p.rx > 0 && p.ry > 0 {
+		rx, ry = p.rx*sx, p.ry*sy
+	}
 	scaleX, scaleY := 1.0, 1.0
 	tx, ty := m.toEMU(cx-rx, cy-ry)
 	if p.flipX {
@@ -788,13 +794,18 @@ func (m *Mapper) emitArc(e *svgpkg.Element, p pathPiece, mat svgpkg.Matrix) {
 		},
 	}})
 	m.styleShape(id, e, mat)
+	return id
 }
 
 func (m *Mapper) createLine(e *svgpkg.Element, category string, x1, y1, x2, y2 float64, mat svgpkg.Matrix) {
 	m.createLinePiece(e, category, x1, y1, x2, y2, true, mat)
 }
 
-func (m *Mapper) createLinePiece(e *svgpkg.Element, category string, x1, y1, x2, y2 float64, withMarker bool, mat svgpkg.Matrix) {
+func (m *Mapper) createLinePiece(e *svgpkg.Element, category string, x1, y1, x2, y2 float64, withMarker bool, mat svgpkg.Matrix) string {
+	return m.createLinePieceMarkers(e, category, x1, y1, x2, y2, withMarker, withMarker, mat)
+}
+
+func (m *Mapper) createLinePieceMarkers(e *svgpkg.Element, category string, x1, y1, x2, y2 float64, startMarker, endMarker bool, mat svgpkg.Matrix) string {
 	ex1, ey1 := m.toEMU(x1, y1)
 	ex2, ey2 := m.toEMU(x2, y2)
 	w := math.Abs(ex2 - ex1)
@@ -836,22 +847,23 @@ func (m *Mapper) createLinePiece(e *svgpkg.Element, category string, x1, y1, x2,
 		props.DashStyle = dashStyle(dash)
 		fields = append(fields, "dashStyle")
 	}
-	if withMarker && e.Attr("marker-end") != "" {
+	if endMarker && e.Attr("marker-end") != "" {
 		props.EndArrow = "FILL_ARROW"
 		fields = append(fields, "endArrow")
 	}
-	if withMarker && e.Attr("marker-start") != "" {
+	if startMarker && e.Attr("marker-start") != "" {
 		props.StartArrow = "FILL_ARROW"
 		fields = append(fields, "startArrow")
 	}
 	if len(fields) == 0 {
-		return
+		return id
 	}
 	m.reqs = append(m.reqs, &slides.Request{UpdateLineProperties: &slides.UpdateLinePropertiesRequest{
 		ObjectId:       id,
 		LineProperties: props,
 		Fields:         strings.Join(fields, ","),
 	}})
+	return id
 }
 
 // ---------------------------------------------------------------------------

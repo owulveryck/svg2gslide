@@ -3,6 +3,7 @@
 package gslide
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -69,6 +70,26 @@ func (c *Client) BatchUpdate(ctx context.Context, presentationID string, reqs []
 		}
 	}
 	return nil
+}
+
+// HostImage uploads an image to Drive, readable by anyone with the link
+// when the domain policy allows it, and returns a URL the Slides API can
+// fetch plus a cleanup function that deletes the file (Slides copies the
+// image at insertion time).
+func (c *Client) HostImage(ctx context.Context, name, mime string, data []byte) (string, func(), error) {
+	f, err := retry.DoWithResult(ctx, "files.create", func() (*drive.File, error) {
+		return c.Drive.Files.Create(&drive.File{Name: name, MimeType: mime}).
+			Media(bytes.NewReader(data)).Fields("id").Context(ctx).Do()
+	})
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to upload image: %w", err)
+	}
+	cleanup := func() { _ = c.Drive.Files.Delete(f.Id).Context(context.Background()).Do() }
+	// Public sharing may be forbidden by the Workspace policy
+	// (publishOutNotPermitted): the file then stays private and Slides
+	// fetches it with the caller's credentials when it can.
+	_, _ = c.Drive.Permissions.Create(f.Id, &drive.Permission{Type: "anyone", Role: "reader"}).Context(ctx).Do()
+	return "https://drive.google.com/uc?export=download&id=" + f.Id, cleanup, nil
 }
 
 // FetchSlideThumbnail downloads a PNG thumbnail of the given slide.

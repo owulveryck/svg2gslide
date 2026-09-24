@@ -23,6 +23,10 @@ type Input struct {
 	PageW, PageH float64   // presentation page size in EMU
 	Phase        string    // "" → use the SVG's data-active-phase attribute
 	Verbose      bool      // passed to mapper.Config
+	// TextTransform applies CSS text-transform (uppercase, …) like
+	// browsers do. Off by default: common SVG rasterizers (librsvg, resvg)
+	// ignore it, and the text stays editable in its original case.
+	TextTransform bool
 }
 
 // Result is the outcome of a conversion, ready for a batchUpdate call.
@@ -31,6 +35,38 @@ type Result struct {
 	Phase    string            // effective phase actually used
 	Requests []*slides.Request // CreateSlide prepended; len ≥ 1
 	Warnings []string
+	// Images lists the embedded (data: URI) images: their CreateImage
+	// requests carry a placeholder URL to replace with a public URL (see
+	// SetImageURLs) or to drop (DropEmbeddedImages).
+	Images []mapper.EmbeddedImage
+}
+
+// SetImageURLs substitutes the hosted URL of each embedded image.
+func (r *Result) SetImageURLs(urls map[string]string) {
+	for _, q := range r.Requests {
+		if ci := q.CreateImage; ci != nil {
+			if u, ok := urls[ci.Url]; ok {
+				ci.Url = u
+			}
+		}
+	}
+}
+
+// DropEmbeddedImages removes the CreateImage requests of embedded images
+// (when no hosting is available).
+func (r *Result) DropEmbeddedImages() {
+	out := r.Requests[:0]
+	for _, q := range r.Requests {
+		if q.CreateImage != nil && strings.HasPrefix(q.CreateImage.Url, mapper.ImagePlaceholderPrefix) {
+			continue
+		}
+		out = append(out, q)
+	}
+	if n := len(r.Requests) - len(out); n > 0 {
+		r.Warnings = append(r.Warnings, fmt.Sprintf("%d image(s) intégrée(s) ignorée(s) (hébergement indisponible)", n))
+	}
+	r.Requests = out
+	r.Images = nil
 }
 
 // Convert parses the SVG and maps it to Slides requests, fit-centered on a
@@ -58,11 +94,17 @@ func Convert(in Input) (*Result, error) {
 	if phase == "" {
 		phase = root.Attr("data-active-phase")
 	}
-	var sheet *svgpkg.Stylesheet
-	if styleEl := root.Find("style"); styleEl != nil {
-		sheet = svgpkg.ParseStylesheet(styleEl.RawTextContent())
-	} else {
-		sheet = svgpkg.ParseStylesheet("")
+	var css strings.Builder
+	root.Walk(func(e *svgpkg.Element) {
+		if e.Tag == "style" {
+			css.WriteString(e.RawTextContent())
+			css.WriteByte('\n')
+		}
+	})
+	sheet := svgpkg.ParseStylesheet(css.String())
+	svgpkg.ApplyStylesheet(root, sheet)
+	if !in.TextTransform {
+		root.Walk(func(e *svgpkg.Element) { delete(e.Attrs, "text-transform") })
 	}
 
 	scale := min(in.PageW/vb.W, in.PageH/vb.H)
@@ -90,7 +132,7 @@ func Convert(in Input) (*Result, error) {
 		SlideLayoutReference: &slides.LayoutReference{PredefinedLayout: "BLANK"},
 	}}}, reqs...)
 
-	return &Result{SlideID: slideID, Phase: phase, Requests: all, Warnings: warnings}, nil
+	return &Result{SlideID: slideID, Phase: phase, Requests: all, Warnings: warnings, Images: m.Images()}, nil
 }
 
 // fontFamily extracts the first font of the root font-family attribute.

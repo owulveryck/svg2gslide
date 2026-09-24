@@ -2,6 +2,7 @@ package svg
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -153,5 +154,48 @@ func TestPhaseSwitching(t *testing.T) {
 	}
 	if sheet.Visible(platTop, "8") {
 		t.Error("plat-top should be hidden in phase 8")
+	}
+}
+
+func TestApplyStylesheetCascade(t *testing.T) {
+	root, err := Parse(strings.NewReader(`<svg>
+  <style>
+    .item { font-size: 11px; fill: #3E4F78; font-weight: 700 }
+    text.item { fill: #111111 }
+    .card { fill: #FFFFFF; stroke: #CFD3DD; }
+    #special { fill: #FF0000 }
+  </style>
+  <text class="item" fill="#CFD3DD">stylesheet beats attribute</text>
+  <text class="item" style="fill:#00FF00">inline beats stylesheet</text>
+  <rect class="card"/>
+  <rect class="card" id="special"/>
+</svg>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ApplyStylesheet(root, ParseStylesheet(root.Find("style").RawTextContent()))
+	var texts, rects []*Element
+	root.Walk(func(e *Element) {
+		switch e.Tag {
+		case "text":
+			texts = append(texts, e)
+		case "rect":
+			rects = append(rects, e)
+		}
+	})
+	if got := texts[0].Attr("fill"); got != "#111111" {
+		t.Errorf("fill = %q, want the more specific text.item rule over the attribute", got)
+	}
+	if texts[0].Attr("font-size") != "11px" || texts[0].Attr("font-weight") != "700" {
+		t.Errorf("font = %q/%q, want class declarations applied", texts[0].Attr("font-size"), texts[0].Attr("font-weight"))
+	}
+	if got := texts[1].Attr("fill"); got != "#00FF00" {
+		t.Errorf("fill = %q, want the inline style to win", got)
+	}
+	if rects[0].Attr("fill") != "#FFFFFF" || rects[0].Attr("stroke") != "#CFD3DD" {
+		t.Errorf("card = %q/%q, want the class fill and stroke", rects[0].Attr("fill"), rects[0].Attr("stroke"))
+	}
+	if got := rects[1].Attr("fill"); got != "#FF0000" {
+		t.Errorf("fill = %q, want the #id rule to win over the class", got)
 	}
 }

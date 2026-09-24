@@ -77,6 +77,8 @@ func convertFunc(this js.Value, args []js.Value) any {
 				fail(err)
 				return
 			}
+			// No Drive scope in the browser: embedded images can't be hosted.
+			res.DropEmbeddedImages()
 			if err := client.BatchUpdate(ctx, id, res.Requests); err != nil {
 				fail(err)
 				return

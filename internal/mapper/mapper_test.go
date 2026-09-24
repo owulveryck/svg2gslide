@@ -274,7 +274,7 @@ func TestTextAnchorStartUsesTextLength(t *testing.T) {
 	if w := box.ElementProperties.Size.Width.Magnitude; w < 72.167*testScale+2*textInsetEMU {
 		t.Errorf("box w = %.0f EMU, narrower than textLength + insets (would wrap)", w)
 	}
-	nearEMU(t, "box x", box.ElementProperties.Transform.TranslateX, 12*testScale-textInsetEMU)
+	nearEMU(t, "box x", box.ElementProperties.Transform.TranslateX, 12*testScale-textInsetEMU+textOriginShiftEMU)
 
 	var alignment, font string
 	for _, r := range reqs {

@@ -79,6 +79,7 @@ var inlineStyleProps = map[string]bool{
 	"font-weight": true, "font-style": true, "text-anchor": true,
 	"visibility": true, "display": true, "letter-spacing": true,
 	"stop-color": true, "stop-opacity": true, "dominant-baseline": true,
+	"text-transform": true, "text-decoration": true,
 }
 
 // mergeInlineStyle folds style="k:v;..." declarations into the attribute map.
@@ -124,6 +125,7 @@ var inheritedProps = map[string]bool{
 	"stroke-dasharray": true, "stroke-opacity": true, "font-family": true,
 	"font-size": true, "font-weight": true, "font-style": true,
 	"text-anchor": true, "letter-spacing": true, "visibility": true,
+	"text-transform": true, "text-decoration": true,
 }
 
 // Inherited returns the attribute value, looking up the ancestor chain for

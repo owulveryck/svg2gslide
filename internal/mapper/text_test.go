@@ -60,12 +60,18 @@ func TestMultilineTextSingleBox(t *testing.T) {
 	var text string
 	var lineSpacing float64
 	var top string
+	var above []float64
 	for _, r := range reqs {
 		if r.InsertText != nil {
 			text = r.InsertText.Text
 		}
-		if p := r.UpdateParagraphStyle; p != nil && p.Style.LineSpacing > 0 {
-			lineSpacing = p.Style.LineSpacing
+		if p := r.UpdateParagraphStyle; p != nil {
+			if p.Style.LineSpacing > 0 {
+				lineSpacing = p.Style.LineSpacing
+			}
+			if p.TextRange.Type == "FIXED_RANGE" && p.Style.SpaceAbove != nil {
+				above = append(above, p.Style.SpaceAbove.Magnitude)
+			}
 		}
 		if u := r.UpdateShapeProperties; u != nil {
 			top = u.ShapeProperties.ContentAlignment
@@ -74,9 +80,14 @@ func TestMultilineTextSingleBox(t *testing.T) {
 	if text != "one\ntwo\nthree" {
 		t.Errorf("text = %q", text)
 	}
-	// 30 units pitch for 20 units font = 1.5em → 1.5/1.197 single spacing.
-	if want := 100 * 1.5 / slidesLineHeight; math.Abs(lineSpacing-want) > 0.2 {
-		t.Errorf("lineSpacing = %v, want %.1f", lineSpacing, want)
+	// 30 units pitch for 20 units font = 1.5em: line spacing capped at
+	// 115%, the rest as spaceAbove on lines 2 and 3.
+	if lineSpacing != 115 {
+		t.Errorf("lineSpacing = %v, want 115", lineSpacing)
+	}
+	wantAbove := (30 - naturalPitch(1.15, 20, 20)) * testScale / emuPerPt
+	if len(above) != 2 || math.Abs(above[0]-wantAbove) > 0.02 || math.Abs(above[1]-wantAbove) > 0.02 {
+		t.Errorf("spaceAbove = %v pt, want 2× %.2f", above, wantAbove)
 	}
 	if top != "TOP" {
 		t.Errorf("contentAlignment = %q, want TOP", top)
@@ -84,7 +95,7 @@ func TestMultilineTextSingleBox(t *testing.T) {
 	// First baseline must land on y=200.
 	box := shapes[0].ElementProperties
 	f := 20 * testScale
-	wantTop := 200*testScale - textInsetEMU - slidesAscent*f
+	wantTop := 200*testScale - textInsetEMU - firstBaselineOffset(f, 1.15)
 	nearEMU(t, "box y", box.Transform.TranslateY, wantTop)
 }
 

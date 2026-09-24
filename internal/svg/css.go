@@ -52,9 +52,31 @@ type rule struct {
 	opacity  float64
 }
 
-// Stylesheet holds the opacity rules extracted from a <style> block.
+// styleRule is a flat, unconditional rule (single compound selector) whose
+// presentation declarations are cascaded onto matching elements.
+type styleRule struct {
+	matchers    []matcher
+	specificity int
+	order       int
+	decls       [][2]string
+}
+
+// Stylesheet holds the opacity rules extracted from a <style> block, plus
+// the presentation declarations of simple selectors.
 type Stylesheet struct {
-	rules []rule
+	rules  []rule
+	styles []styleRule
+}
+
+// cascadedProps lists the declarations promoted from stylesheet rules into
+// element attributes (opacity is handled separately by Opacity).
+var cascadedProps = map[string]bool{
+	"fill": true, "fill-opacity": true, "stroke": true, "stroke-width": true,
+	"stroke-dasharray": true, "stroke-opacity": true, "font-family": true,
+	"font-size": true, "font-weight": true, "font-style": true,
+	"text-anchor": true, "letter-spacing": true, "text-transform": true,
+	"visibility": true, "display": true, "dominant-baseline": true,
+	"stop-color": true, "stop-opacity": true, "text-decoration": true,
 }
 
 var (
@@ -118,6 +140,7 @@ func skipBlock(css string, i int) int {
 }
 
 func (s *Stylesheet) addRule(selector, body string) {
+	s.addStyleRule(selector, body)
 	m := opacityRe.FindStringSubmatch(body)
 	if m == nil {
 		return
@@ -149,6 +172,113 @@ func (s *Stylesheet) addRule(selector, body string) {
 		}
 		s.rules = append(s.rules, rule{phases: phases, matchers: matchers, opacity: op})
 	}
+}
+
+// addStyleRule records the cascadable declarations of each simple selector
+// (a single compound: .class, #id, tag, tag.class) of the rule. Selectors
+// with combinators or phase guards are left to the opacity evaluator.
+func (s *Stylesheet) addStyleRule(selector, body string) {
+	var decls [][2]string
+	for decl := range strings.SplitSeq(body, ";") {
+		k, v, ok := strings.Cut(decl, ":")
+		if !ok {
+			continue
+		}
+		k = strings.ToLower(strings.TrimSpace(k))
+		v = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(v), "!important"))
+		if cascadedProps[k] && v != "" {
+			decls = append(decls, [2]string{k, v})
+		}
+	}
+	if len(decls) == 0 {
+		return
+	}
+	for _, sel := range splitTop(selector, ',') {
+		sel = strings.TrimSpace(sel)
+		if sel == "" || len(splitTopSpace(sel)) != 1 || strings.ContainsAny(sel, ":>+~[") {
+			continue
+		}
+		ms, spec, ok := parseCompound(sel)
+		if !ok {
+			continue
+		}
+		s.styles = append(s.styles, styleRule{matchers: ms, specificity: spec, order: len(s.styles), decls: decls})
+	}
+}
+
+// parseCompound parses "tag.class1.class2#id" into matchers that must all
+// match, with its CSS specificity (id=100, class=10, tag=1).
+func parseCompound(sel string) ([]matcher, int, bool) {
+	var ms []matcher
+	spec := 0
+	i := 0
+	for i < len(sel) {
+		j := i + 1
+		for j < len(sel) && sel[j] != '.' && sel[j] != '#' {
+			j++
+		}
+		part := sel[i:j]
+		switch {
+		case part[0] == '.':
+			ms = append(ms, matcher{kind: matchClass, name: part[1:]})
+			spec += 10
+		case part[0] == '#':
+			ms = append(ms, matcher{kind: matchID, name: part[1:]})
+			spec += 100
+		case part == "*":
+		default:
+			if !isIdent(part) {
+				return nil, 0, false
+			}
+			ms = append(ms, matcher{kind: matchTag, name: part})
+			spec++
+		}
+		i = j
+	}
+	return ms, spec, len(ms) > 0 || sel == "*"
+}
+
+// ApplyStylesheet cascades the stylesheet declarations onto the element
+// attributes, per CSS precedence: presentation attribute < stylesheet rule
+// (by specificity, then source order) < inline style declaration.
+func ApplyStylesheet(root *Element, s *Stylesheet) {
+	if s == nil || len(s.styles) == 0 {
+		return
+	}
+	root.Walk(func(e *Element) {
+		inline := map[string]bool{}
+		for decl := range strings.SplitSeq(e.Attrs["style"], ";") {
+			if k, _, ok := strings.Cut(decl, ":"); ok {
+				inline[strings.TrimSpace(k)] = true
+			}
+		}
+		var matched []styleRule
+		for _, r := range s.styles {
+			all := true
+			for _, m := range r.matchers {
+				if !m.matches(e) {
+					all = false
+					break
+				}
+			}
+			if all {
+				matched = append(matched, r)
+			}
+		}
+		// Stable insertion sort by specificity (source order kept).
+		for i := 1; i < len(matched); i++ {
+			for j := i; j > 0 && matched[j].specificity < matched[j-1].specificity; j-- {
+				matched[j], matched[j-1] = matched[j-1], matched[j]
+			}
+		}
+		for _, r := range matched {
+			for _, d := range r.decls {
+				if !inline[d[0]] {
+					e.Attrs[d[0]] = d[1]
+				}
+			}
+		}
+	})
 }
 
 func parseTarget(t string) []matcher {
