@@ -172,13 +172,28 @@ func (m *Mapper) mapRect(e *svgpkg.Element, mat svgpkg.Matrix) {
 		m.absorbBackground(e)
 		return
 	}
-	shapeType := "RECTANGLE"
-	if e.FloatAttr("rx", 0) > 0 || e.FloatAttr("ry", 0) > 0 {
-		shapeType = "ROUND_RECTANGLE"
+	rx := e.FloatAttr("rx", -1)
+	ry := e.FloatAttr("ry", -1)
+	if rx < 0 {
+		rx = ry
+	}
+	if ry < 0 {
+		ry = rx
+	}
+	r := math.Min(math.Max(rx, 0)*sx, math.Max(ry, 0)*sy)
+	shapeType, rot := roundedRectShape(w, h, r)
+	if shapeType == "FLOW_CHART_TERMINATOR" && m.opaqueNoStroke(e) {
+		m.emitPill(e, x, y, w, h, mat)
+		return
 	}
 	id := m.nextID()
 	ex, ey := m.toEMU(x, y)
-	m.createShape(id, shapeType, ex, ey, m.lenEMU(w), m.lenEMU(h), 0)
+	if rot {
+		// Vertical pill: a horizontal terminator turned 90°.
+		m.createShapeRotated(id, shapeType, ex+m.lenEMU(w)/2, ey+m.lenEMU(h)/2, m.lenEMU(h), m.lenEMU(w), math.Pi/2)
+	} else {
+		m.createShape(id, shapeType, ex, ey, m.lenEMU(w), m.lenEMU(h), 0)
+	}
 	m.styleShape(id, e, mat)
 }
 
@@ -376,7 +391,10 @@ func pathEndpoints(e *svgpkg.Element) [][2]float64 {
 }
 
 func (m *Mapper) mapPolygon(e *svgpkg.Element, mat svgpkg.Matrix) {
-	pts := dropClosingPoint(svgpkg.ParsePoints(e.Attr("points")))
+	m.mapPolygonPts(e, dropClosingPoint(svgpkg.ParsePoints(e.Attr("points"))), mat)
+}
+
+func (m *Mapper) mapPolygonPts(e *svgpkg.Element, pts [][2]float64, mat svgpkg.Matrix) {
 	switch {
 	case len(pts) == 3:
 		m.mapTrianglePolygon(e, pts, mat)
@@ -393,6 +411,14 @@ func (m *Mapper) mapPolygon(e *svgpkg.Element, mat svgpkg.Matrix) {
 			return
 		}
 		tpts := applyAll(mat, pts)
+		if isDiamond(tpts) {
+			minX, minY, w, h := bbox(tpts)
+			id := m.nextID()
+			ex, ey := m.toEMU(minX, minY)
+			m.createShape(id, "DIAMOND", ex, ey, m.lenEMU(w), m.lenEMU(h), 0)
+			m.styleShape(id, e, mat)
+			return
+		}
 		minX, minY, w, h := bbox(tpts)
 		id := m.nextID()
 		ex, ey := m.toEMU(minX, minY)
@@ -612,11 +638,7 @@ func (m *Mapper) mapPath(e *svgpkg.Element, mat svgpkg.Matrix) {
 		case 'A':
 			for i := 0; i+6 < len(s.Args); i += 7 {
 				end := [2]float64{s.Args[i+5], s.Args[i+6]}
-				if p, ok := quarterArcPiece(cur, end, s.Args[i], s.Args[i+1], s.Args[i+4] != 0); ok {
-					pieces = append(pieces, p)
-				} else {
-					pieces = append(pieces, pathPiece{category: "CURVED", p0: cur, p1: end})
-				}
+				pieces = append(pieces, arcPieces(cur, end, s.Args[i], s.Args[i+1], s.Args[i+3] != 0, s.Args[i+4] != 0)...)
 				cur = end
 				outline = append(outline, cur)
 			}
@@ -645,6 +667,13 @@ func (m *Mapper) mapPath(e *svgpkg.Element, mat svgpkg.Matrix) {
 	// A closed, filled path is a free-form solid: keep its footprint as a
 	// rounded rectangle rather than exploding it into stray connectors.
 	if closed && m.isFilled(e) {
+		if poly, ok := straightPolygon(segs); ok {
+			m.mapPolygonPts(e, poly, mat)
+			return
+		}
+		if m.mapSemicircle(e, segs, mat) {
+			return
+		}
 		tpts := applyAll(mat, outline)
 		minX, minY, w, h := bbox(tpts)
 		id := m.nextID()
@@ -726,56 +755,6 @@ func cubicPieces(p0, c1, c2, p1 [2]float64) []pathPiece {
 		}
 	}
 	return []pathPiece{{category: "CURVED", p0: p0, p1: p1}}
-}
-
-// quarterArcPiece recognizes a circular 90° arc whose endpoints are axis
-// aligned with the circle center, and returns it as an ARC-shape piece.
-func quarterArcPiece(p0, p1 [2]float64, rx, ry float64, sweep bool) (pathPiece, bool) {
-	if rx <= 0 || math.Abs(rx-ry) > 0.01*rx {
-		return pathPiece{}, false
-	}
-	r := rx
-	chord := math.Hypot(p1[0]-p0[0], p1[1]-p0[1])
-	if chord <= 0 || chord > 2*r {
-		return pathPiece{}, false
-	}
-	h := math.Sqrt(math.Max(r*r-(chord/2)*(chord/2), 0))
-	ux, uy := (p1[0]-p0[0])/chord, (p1[1]-p0[1])/chord
-	// The (minor-arc) center sits perpendicular to the chord: on the
-	// +90°-rotated side for sweep=1, the -90° side for sweep=0.
-	px, py := uy, -ux
-	if sweep {
-		px, py = -uy, ux
-	}
-	cx := (p0[0]+p1[0])/2 + px*h
-	cy := (p0[1]+p1[1])/2 + py*h
-
-	axis := func(dx, dy float64) int {
-		switch {
-		case math.Abs(dy) < r*0.05 && math.Abs(dx) > r*0.95:
-			if dx > 0 {
-				return 0 // +x
-			}
-			return 2 // -x
-		case math.Abs(dx) < r*0.05 && math.Abs(dy) > r*0.95:
-			if dy > 0 {
-				return 1 // +y
-			}
-			return 3 // -y
-		}
-		return -1
-	}
-	a0 := axis(p0[0]-cx, p0[1]-cy)
-	a1 := axis(p1[0]-cx, p1[1]-cy)
-	if a0 < 0 || a1 < 0 || (a0+a1)%2 == 0 {
-		return pathPiece{}, false
-	}
-	return pathPiece{
-		arc: true,
-		cx:  cx, cy: cy, r: r,
-		flipX: (p0[0]-cx)+(p1[0]-cx) < 0,
-		flipY: (p0[1]-cy)+(p1[1]-cy) > 0,
-	}, true
 }
 
 // emitArc creates a native ARC shape covering one quadrant of the circle.

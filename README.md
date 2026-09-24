@@ -84,23 +84,44 @@ Notes:
    visibility CSS (`[data-active-phase="N"]`) — animations (`@keyframes`,
    dots, highlights) are ignored.
 2. Mapping to `batchUpdate` requests (`internal/mapper`):
-   - `rect` → RECTANGLE / ROUND_RECTANGLE, `circle` → ELLIPSE;
+   - presentation attributes are **inherited** from ancestor groups, and
+     group `opacity` is composed into fill/stroke alpha;
+   - colours: hex (`#rgb`, `#rrggbb`, `#rrggbbaa`), `rgb()`/`rgba()`, common
+     names; **gradients** (`url(#id)`) are reduced to their average colour
+     (the Slides API has no gradient fills);
+   - a full-page background rectangle becomes the **page background**;
+   - `rect` → RECTANGLE / ROUND_RECTANGLE (square corners when the native
+     rounding would be much larger than `rx`), pills → exact stadium
+     (rectangle + two discs, grouped) or FLOW_CHART_TERMINATOR when
+     stroked, `circle`/`ellipse` → ELLIPSE;
    - `line` → STRAIGHT connector (arrow if `marker-end`);
-   - axis-aligned quarter arcs (`A`) → native **ARC** shape, oriented per
-     quadrant via scaleX/scaleY flips;
-   - quadratic curves (`Q`) → CURVED connector, split at the midpoint when
-     the curve is deep;
-   - 3-point polygons (chevrons) → TRIANGLE with rotation;
-   - "3D box" groups (≥3 polygons) → CUBE shape;
-   - `text` → centered TEXT_BOX (font, size, bold/italic, color).
+   - paths: absolute and relative commands, `S`/`T`; circular arcs are split
+     into native quarter **ARC** shapes; `Q`/`C` → CURVED connectors, split
+     at the midpoint when deep; closed straight paths are treated as
+     polygons; a closed half-disc → FLOW_CHART_DELAY;
+   - polygons: 3 points → rotated TRIANGLE, axis-aligned rhombus → DIAMOND,
+     arrowhead "darts" → TRIANGLE, "3D box" groups → CUBE;
+   - `text` → **one multi-paragraph TEXT_BOX per `<text>`**: each
+     `<tspan>` with `dy`/`y` starts a paragraph, inline tspans become styled
+     runs (fill, weight, style, size). Baselines land on the SVG baselines
+     (calibrated Slides metrics: 0.1" inset, first baseline at 0.944 em,
+     line pitch 1.197 em × lineSpacing), line spacing derived from `dy`,
+     rotation carried by the box transform, gradient text coloured per
+     character, box width from Arial advance widths so lines never wrap.
 3. A single BLANK slide is created and then filled in one `batchUpdate`
    (chunked past 400 requests).
 
 ## Known approximations
 
-- Closed cubic-curve paths (clouds, etc.): ignored (warning under `-v`).
+- `letter-spacing` is not supported by the Slides API (ignored).
+- Gradients → average solid colour; radial glows → uniform tint.
+- Text opacity is flattened against the page background colour.
+- Large `rx` on big shapes cannot be reproduced (Slides fixes the corner
+  radius); `clipPath`, `mask`, `filter` are ignored.
+- Closed curved paths other than half-discs: bounding box (warning under `-v`).
 - Highlighter halo around tspans: rendered as plain bold.
-- The SVG's font (e.g. `Outfit`) must exist in Google Fonts.
+- The SVG's font (e.g. `Outfit`) must exist in Google Fonts; text widths
+  are estimated with Arial metrics.
 
 ## Visual validation
 
