@@ -29,12 +29,13 @@ func main() {
 		exportPDF    = flag.String("export-pdf", "", "export the whole presentation as PDF to this path")
 		verbose      = flag.Bool("v", false, "log skipped and approximated elements")
 		textTf       = flag.Bool("text-transform", false, "apply CSS text-transform (uppercase…) as browsers do; off by default like librsvg/resvg")
+		connect      = flag.Bool("connect-curves", false, "replace edges between shapes (PlantUML links, curved paths) by connectors attached to both shapes")
 		dryRun       = flag.Bool("dry-run", false, "convert offline (16:9 page) and print element statistics, without calling the API")
 	)
 	flag.Parse()
 
 	if *dryRun {
-		if err := dry(*svgPath, *phase, *verbose, *textTf); err != nil {
+		if err := dry(*svgPath, *phase, *verbose, *textTf, *connect); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
@@ -51,13 +52,13 @@ func main() {
 			os.Exit(2)
 		}
 	}
-	if err := run(context.Background(), *svgPath, *presentation, *credentials, *phase, *outThumbnail, *exportPDF, *verbose, *textTf); err != nil {
+	if err := run(context.Background(), *svgPath, *presentation, *credentials, *phase, *outThumbnail, *exportPDF, *verbose, *textTf, *connect); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, svgPath, presentationID, credentials, phase, outThumbnail, exportPDF string, verbose, textTransform bool) error {
+func run(ctx context.Context, svgPath, presentationID, credentials, phase, outThumbnail, exportPDF string, verbose, textTransform, connect bool) error {
 	var (
 		r     io.Reader
 		label = svgPath
@@ -109,6 +110,7 @@ func run(ctx context.Context, svgPath, presentationID, credentials, phase, outTh
 		Verbose: verbose,
 
 		TextTransform: textTransform,
+		ConnectCurves: connect,
 	})
 	if err != nil {
 		return err
@@ -161,28 +163,49 @@ func run(ctx context.Context, svgPath, presentationID, credentials, phase, outTh
 
 // dry converts the SVG against a default 16:9 page and prints what would be
 // created, one line per text box.
-func dry(svgPath, phase string, verbose, textTransform bool) error {
+func dry(svgPath, phase string, verbose, textTransform, connect bool) error {
 	f, err := os.Open(svgPath)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	res, err := convert.Convert(convert.Input{SVG: f, Label: svgPath, PageW: 9144000, PageH: 5143500, Phase: phase, Verbose: verbose, TextTransform: textTransform})
+	res, err := convert.Convert(convert.Input{SVG: f, Label: svgPath, PageW: 9144000, PageH: 5143500, Phase: phase, Verbose: verbose, TextTransform: textTransform, ConnectCurves: connect})
 	if err != nil {
 		return err
 	}
 	counts := map[string]int{}
+	boxes := map[string]bool{}
+	inShape, conns, groups := 0, 0, 0
 	for _, r := range res.Requests {
 		switch {
 		case r.CreateShape != nil:
 			counts[r.CreateShape.ShapeType]++
+			if r.CreateShape.ShapeType == "TEXT_BOX" {
+				boxes[r.CreateShape.ObjectId] = true
+			}
 		case r.CreateLine != nil:
 			counts["LINE"]++
-		case r.InsertText != nil && verbose:
-			fmt.Printf("  text %q\n", r.InsertText.Text)
+		case r.InsertText != nil:
+			if !boxes[r.InsertText.ObjectId] {
+				inShape++
+			}
+			if verbose {
+				fmt.Printf("  text %q\n", r.InsertText.Text)
+			}
+		case r.UpdateLineProperties != nil:
+			lp := r.UpdateLineProperties.LineProperties
+			if lp.StartConnection != nil {
+				conns++
+			}
+			if lp.EndConnection != nil {
+				conns++
+			}
+		case r.GroupObjects != nil:
+			groups++
 		}
 	}
-	fmt.Printf("%s: %d requests, textboxes=%d, shapes/lines=%v\n", svgPath, len(res.Requests), counts["TEXT_BOX"], counts)
+	fmt.Printf("%s: %d requests, textboxes=%d, text-in-shapes=%d, connections=%d, groups=%d, shapes/lines=%v\n",
+		svgPath, len(res.Requests), counts["TEXT_BOX"], inShape, conns, groups, counts)
 	if verbose {
 		for _, w := range res.Warnings {
 			fmt.Fprintln(os.Stderr, "  [approx]", w)

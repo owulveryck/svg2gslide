@@ -27,6 +27,8 @@ type Input struct {
 	// browsers do. Off by default: common SVG rasterizers (librsvg, resvg)
 	// ignore it, and the text stays editable in its original case.
 	TextTransform bool
+	// ConnectCurves replaces edges between shapes by attached connectors.
+	ConnectCurves bool
 }
 
 // Result is the outcome of a conversion, ready for a batchUpdate call.
@@ -121,6 +123,8 @@ func Convert(in Input) (*Result, error) {
 		ViewBox:    vb,
 		FontFamily: fontFamily(root),
 		Verbose:    in.Verbose,
+
+		ConnectCurves: in.ConnectCurves,
 	}, sheet)
 	reqs, warnings := m.Map(root)
 	if len(reqs) == 0 {

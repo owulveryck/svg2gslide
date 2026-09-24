@@ -149,7 +149,16 @@ func dumpElements(els []*slides.PageElement, indent string) {
 		if txt != "" {
 			fmt.Printf("  %q", txt)
 		}
-		fmt.Println()
+		if e.Line != nil && e.Line.LineProperties != nil {
+			lp := e.Line.LineProperties
+			if c := lp.StartConnection; c != nil {
+				fmt.Printf("  start=%s#%d", c.ConnectedObjectId, c.ConnectionSiteIndex)
+			}
+			if c := lp.EndConnection; c != nil {
+				fmt.Printf("  end=%s#%d", c.ConnectedObjectId, c.ConnectionSiteIndex)
+			}
+		}
+		fmt.Printf("  [%s]\n", e.ObjectId)
 		if e.ElementGroup != nil {
 			dumpElements(e.ElementGroup.Children, indent+"  ")
 		}

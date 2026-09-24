@@ -13,6 +13,9 @@ import (
 // attributes, with gradients reduced to a solid colour and group opacity
 // folded into the alpha channels.
 func (m *Mapper) styleShape(id string, e *svgpkg.Element, mat svgpkg.Matrix) {
+	if m.elemShape != nil && m.elemShape[e] == "" {
+		m.elemShape[e] = id
+	}
 	props := &slides.ShapeProperties{}
 	var fields []string
 	op := m.opacity(e)

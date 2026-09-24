@@ -32,6 +32,9 @@ const (
 	slidesAscentOffset = 0.4 * emuPerPt
 	slidesReduceAbove  = 0.8
 	slidesDescent      = 0.25
+	// slidesMiddleDescent is the part of the last line below its baseline
+	// counted in the block height when it is vertically centred.
+	slidesMiddleDescent = 0.195
 	// Glyph origins land 0.45pt left of the 0.1" inset (the effective
 	// horizontal inset is 6.75pt, i.e. 9px at 96dpi).
 	textOriginShiftEMU = 0.45 * emuPerPt
@@ -359,100 +362,156 @@ func (m *Mapper) layoutText(e *svgpkg.Element, lines []*textLine, anchor string,
 	}
 	by := -firstBaseline
 
-	id := m.nextID()
-	m.createRotatedBox(id, mat, ax, lines[0].baseline, bx, by, wEMU, hEMU)
-
-	// Content and runs (indices are UTF-16 code units).
-	var content strings.Builder
-	type span struct {
-		start, end int
-		st         runStyle
-		text       string
-		line       int
+	// Page geometry of the block, used to pick a host shape.
+	px, py := mat.Apply(ax, lines[0].baseline)
+	ex, ey := m.toEMU(px, py)
+	geom := textGeom{
+		rotated: math.Abs(math.Atan2(mat.B, mat.A)) > 1e-6 || mat.A < 0 || mat.D < 0,
+		ax:      ex, base0: ey, align: alignment, f: f, p: p,
+		fl: fl, total: total,
 	}
-	var spans []span
-	pos := 0
 	for i, l := range lines {
-		if i > 0 {
-			content.WriteByte('\n')
-			pos++
+		w := lineW[i] * k
+		var x0 float64
+		switch alignment {
+		case "CENTER":
+			x0 = ex + (l.x-ax)*k - w/2
+		case "END":
+			x0 = ex + (l.x-ax)*k - w
+		default:
+			x0 = ex + (l.x-xMin)*k
 		}
-		for j, r := range l.runs {
-			n := len(utf16.Encode([]rune(r.text)))
-			spans = append(spans, span{pos, pos + n, styles[i][j], r.text, i})
-			content.WriteString(r.text)
-			pos += n
-		}
+		geom.lineX0 = append(geom.lineX0, x0)
+		geom.lineW = append(geom.lineW, w)
 	}
-	m.reqs = append(m.reqs, &slides.Request{InsertText: &slides.InsertTextRequest{ObjectId: id, Text: content.String()}})
-	m.reqs = append(m.reqs, &slides.Request{UpdateTextStyle: &slides.UpdateTextStyleRequest{
-		ObjectId:  id,
-		Style:     m.slidesTextStyle(base, k),
-		TextRange: &slides.Range{Type: "ALL"},
-		Fields:    "fontFamily,fontSize,bold,italic,foregroundColor",
-	}})
-	for _, sp := range spans {
-		if sp.st == base {
-			continue
-		}
-		m.reqs = append(m.reqs, &slides.Request{UpdateTextStyle: &slides.UpdateTextStyleRequest{
-			ObjectId:  id,
-			Style:     m.slidesTextStyle(sp.st, k),
-			TextRange: fixedRange(sp.start, sp.end),
-			Fields:    "fontFamily,fontSize,bold,italic,foregroundColor",
-		}})
+	geom.top = ey - 0.9*f
+	geom.bottom = ey + total + slidesDescent*fl
+	geom.left, geom.right = math.Inf(1), math.Inf(-1)
+	for i := range geom.lineX0 {
+		geom.left = math.Min(geom.left, geom.lineX0[i])
+		geom.right = math.Max(geom.right, geom.lineX0[i]+geom.lineW[i])
 	}
-	m.gradientText(id, e, lines, lineW, styles, anchor, k)
 
-	// Paragraphs: alignment, uniform line spacing, extra pitch as spaceAbove,
-	// per-line indent for start-anchored lines with different x.
-	m.reqs = append(m.reqs, &slides.Request{UpdateParagraphStyle: &slides.UpdateParagraphStyleRequest{
-		ObjectId: id,
-		Style: &slides.ParagraphStyle{
-			Alignment:       alignment,
-			LineSpacing:     math.Round(p*1000) / 10, // p already rounded to 1/1000
-			SpaceAbove:      &slides.Dimension{Magnitude: 0, Unit: "PT", ForceSendFields: []string{"Magnitude"}},
-			SpaceBelow:      &slides.Dimension{Magnitude: 0, Unit: "PT", ForceSendFields: []string{"Magnitude"}},
-			IndentStart:     &slides.Dimension{Magnitude: 0, Unit: "PT", ForceSendFields: []string{"Magnitude"}},
-			IndentFirstLine: &slides.Dimension{Magnitude: 0, Unit: "PT", ForceSendFields: []string{"Magnitude"}},
-		},
-		TextRange: &slides.Range{Type: "ALL"},
-		Fields:    "alignment,lineSpacing,spaceAbove,spaceBelow,indentStart,indentFirstLine",
-	}})
-	lineStart := 0
-	for i, l := range lines {
-		n := len(utf16.Encode([]rune(l.text())))
-		ps := &slides.ParagraphStyle{}
-		var fields []string
-		if extra := extras[i]; extra > 1000 {
-			ps.SpaceAbove = &slides.Dimension{Magnitude: math.Round(extra/emuPerPt*100) / 100, Unit: "PT"}
-			fields = append(fields, "spaceAbove")
+	emit := func(h *hostPlace) string {
+		var id string
+		iS, iE, sa0, sbN := 0.0, 0.0, 0.0, 0.0
+		alignment, vAlign := alignment, "TOP"
+		if h == nil {
+			id = m.nextID()
+			m.createRotatedBox(id, mat, ax, lines[0].baseline, bx, by, wEMU, hEMU)
+		} else {
+			id, iS, iE, sa0, sbN = h.id, h.indentStart, h.indentEnd, h.spaceAbove, h.spaceBelow
+			alignment, vAlign = h.align, "MIDDLE"
 		}
-		if alignment == "START" {
-			if ind := (l.x - xMin) * k; ind > 1000 {
-				ps.IndentStart = &slides.Dimension{Magnitude: ind / emuPerPt, Unit: "PT"}
-				ps.IndentFirstLine = ps.IndentStart
-				fields = append(fields, "indentStart", "indentFirstLine")
+
+		// Content and runs (indices are UTF-16 code units).
+		var content strings.Builder
+		type span struct {
+			start, end int
+			st         runStyle
+			text       string
+			line       int
+		}
+		var spans []span
+		pos := 0
+		for i, l := range lines {
+			if i > 0 {
+				content.WriteByte('\n')
+				pos++
+			}
+			for j, r := range l.runs {
+				n := len(utf16.Encode([]rune(r.text)))
+				spans = append(spans, span{pos, pos + n, styles[i][j], r.text, i})
+				content.WriteString(r.text)
+				pos += n
 			}
 		}
-		if len(fields) > 0 {
-			m.reqs = append(m.reqs, &slides.Request{UpdateParagraphStyle: &slides.UpdateParagraphStyleRequest{
+		m.reqs = append(m.reqs, &slides.Request{InsertText: &slides.InsertTextRequest{ObjectId: id, Text: content.String()}})
+		m.reqs = append(m.reqs, &slides.Request{UpdateTextStyle: &slides.UpdateTextStyleRequest{
+			ObjectId:  id,
+			Style:     m.slidesTextStyle(base, k),
+			TextRange: &slides.Range{Type: "ALL"},
+			Fields:    "fontFamily,fontSize,bold,italic,foregroundColor",
+		}})
+		for _, sp := range spans {
+			if sp.st == base {
+				continue
+			}
+			m.reqs = append(m.reqs, &slides.Request{UpdateTextStyle: &slides.UpdateTextStyleRequest{
 				ObjectId:  id,
-				Style:     ps,
-				TextRange: fixedRange(lineStart, lineStart+n),
-				Fields:    strings.Join(fields, ","),
+				Style:     m.slidesTextStyle(sp.st, k),
+				TextRange: fixedRange(sp.start, sp.end),
+				Fields:    "fontFamily,fontSize,bold,italic,foregroundColor",
 			}})
 		}
-		lineStart += n + 1
+		m.gradientText(id, e, lines, lineW, styles, anchor, k)
+
+		// Paragraphs: alignment, uniform line spacing, extra pitch as spaceAbove,
+		// per-line indent for start-anchored lines with different x.
+		m.reqs = append(m.reqs, &slides.Request{UpdateParagraphStyle: &slides.UpdateParagraphStyleRequest{
+			ObjectId: id,
+			Style: &slides.ParagraphStyle{
+				Alignment:       alignment,
+				LineSpacing:     math.Round(p*1000) / 10, // p already rounded to 1/1000
+				SpaceAbove:      &slides.Dimension{Magnitude: 0, Unit: "PT", ForceSendFields: []string{"Magnitude"}},
+				SpaceBelow:      &slides.Dimension{Magnitude: 0, Unit: "PT", ForceSendFields: []string{"Magnitude"}},
+				IndentStart:     ptDim(iS),
+				IndentFirstLine: ptDim(iS),
+				IndentEnd:       ptDim(iE),
+			},
+			TextRange: &slides.Range{Type: "ALL"},
+			Fields:    "alignment,lineSpacing,spaceAbove,spaceBelow,indentStart,indentFirstLine,indentEnd",
+		}})
+		lineStart := 0
+		for i, l := range lines {
+			n := len(utf16.Encode([]rune(l.text())))
+			ps := &slides.ParagraphStyle{}
+			var fields []string
+			extra := extras[i]
+			if i == 0 {
+				extra += sa0
+			}
+			if extra > 1000 {
+				ps.SpaceAbove = &slides.Dimension{Magnitude: math.Round(extra/emuPerPt*100) / 100, Unit: "PT"}
+				fields = append(fields, "spaceAbove")
+			}
+			if alignment == "START" {
+				if ind := (l.x - xMin) * k; ind > 1000 {
+					ps.IndentStart = &slides.Dimension{Magnitude: (iS + ind) / emuPerPt, Unit: "PT"}
+					ps.IndentFirstLine = ps.IndentStart
+					fields = append(fields, "indentStart", "indentFirstLine")
+				}
+			}
+			if i == len(lines)-1 && sbN > 1000 {
+				ps.SpaceBelow = ptDim(sbN)
+				fields = append(fields, "spaceBelow")
+			}
+			if len(fields) > 0 {
+				m.reqs = append(m.reqs, &slides.Request{UpdateParagraphStyle: &slides.UpdateParagraphStyleRequest{
+					ObjectId:  id,
+					Style:     ps,
+					TextRange: fixedRange(lineStart, lineStart+n),
+					Fields:    strings.Join(fields, ","),
+				}})
+			}
+			lineStart += n + 1
+		}
+		m.reqs = append(m.reqs, &slides.Request{UpdateShapeProperties: &slides.UpdateShapePropertiesRequest{
+			ObjectId: id,
+			ShapeProperties: &slides.ShapeProperties{
+				ContentAlignment: vAlign,
+				Autofit:          &slides.Autofit{AutofitType: "NONE"},
+			},
+			Fields: "contentAlignment,autofit.autofitType",
+		}})
+		return id
 	}
-	m.reqs = append(m.reqs, &slides.Request{UpdateShapeProperties: &slides.UpdateShapePropertiesRequest{
-		ObjectId: id,
-		ShapeProperties: &slides.ShapeProperties{
-			ContentAlignment: "TOP",
-			Autofit:          &slides.Autofit{AutofitType: "NONE"},
-		},
-		Fields: "contentAlignment,autofit.autofitType",
-	}})
+	m.deferText(e, geom, emit)
+}
+
+// ptDim is an explicit (zero included) length in points from EMU.
+func ptDim(emu float64) *slides.Dimension {
+	return &slides.Dimension{Magnitude: math.Round(emu/emuPerPt*100) / 100, Unit: "PT", ForceSendFields: []string{"Magnitude"}}
 }
 
 func fixedRange(start, end int) *slides.Range {

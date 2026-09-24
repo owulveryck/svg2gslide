@@ -30,6 +30,7 @@ Flags:
 | `-out-thumbnail` | download the new slide's PNG thumbnail to this path |
 | `-export-pdf` | export the whole presentation as PDF |
 | `-text-transform` | apply CSS `text-transform` (uppercase…) like browsers; off by default, like librsvg/resvg |
+| `-connect-curves` | replace edges between two shapes (PlantUML links, open curved paths) by one connector attached to both shapes (routed by Slides) |
 | `-dry-run` | convert offline (16:9 page) and print statistics, no API call |
 | `-v` | log skipped/approximated elements |
 
@@ -133,7 +134,24 @@ Notes:
      carried by the box transform, gradient text is coloured per
      character, and the box is wide enough (Arial advance widths) for lines
      never to wrap.
-3. A single BLANK slide is created and then filled in one `batchUpdate`
+3. Editing structure, resolved once everything is mapped (`connect.go`):
+   - **text in shapes**: a block whose topmost underlying object is a
+     rectangle / rounded rectangle / ellipse / terminator containing it
+     (and hosting no other block) is written into that shape, vertically
+     centred (`MIDDLE`) with `spaceAbove`/`spaceBelow` and indents placing
+     the baselines on the SVG ones — the text moves with its box;
+   - otherwise (Slides' fixed 0.1" inset is often wider than the SVG
+     padding, and there is no API to change it) the box is **grouped** with
+     its texts and the small objects drawn on it (badges, icons), unless
+     it is a mere frame (texts covering < 10 % of it) or grouping would
+     change the stacking order;
+   - **connections**: straight connector ends that already lie on a
+     connection site of a shape (edge midpoints, 8 ellipse points) are
+     attached to it — the drawing is unchanged. With `-connect-curves`,
+     PlantUML links (`data-entity-1/2`) and open paths whose ends touch
+     two shapes become one STRAIGHT/CURVED connector attached at both
+     ends, the arrowhead polygon becoming the connector arrow.
+4. A single BLANK slide is created and then filled in one `batchUpdate`
    (chunked past 400 requests).
 
 ## Known approximations
@@ -150,6 +168,9 @@ Notes:
 - Highlighter halo around tspans: rendered as plain bold.
 - The SVG's font (e.g. `Outfit`) must exist in Google Fonts; text widths
   are estimated with Arial metrics.
+- Link labels don't follow connectors (Slides has no connector labels).
+- With `-connect-curves`, Slides routes the connectors itself: the curves
+  and the attachment points (edge midpoints) differ from the SVG.
 - Glyphs missing from Arial (e.g. `▶`) fall back to another font in Slides.
 
 ## Text metrics calibration
@@ -166,7 +187,13 @@ Measured on text-matrix baselines of an exported PDF (PyPDF2), Arial:
 - the first baseline sits 0.955·size − 0.4 pt below the inset (minus the
   80 % share of the reduction when p < 1); `spaceAbove` also applies to
   the first paragraph;
-- line spacing is capped at 115 %; looser pitches become `spaceAbove`.
+- line spacing is capped at 115 %; looser pitches become `spaceAbove`;
+- text inside a shape uses the same metrics within the shape's text
+  rectangle (ECMA-376 presets: rounded rectangle inset 0.293·r with
+  r = min(w,h)/6, ellipse 14.6 %, terminator 1018/21600 · 3163/21600);
+  vertically centred, the block height is spaceAbove + first ascent +
+  pitches + 0.195·size of the last line (+ its extra spacing), and
+  overflow is centred too.
 
 Residual baseline errors are within the renderer's 0.75 pt pixel snapping.
 

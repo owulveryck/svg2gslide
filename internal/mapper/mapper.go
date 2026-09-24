@@ -30,6 +30,10 @@ type Config struct {
 	ViewBox    svgpkg.ViewBox
 	FontFamily string
 	Verbose    bool
+	// ConnectCurves replaces edges between two shapes (PlantUML links,
+	// open curved paths) by a single connector attached at both ends,
+	// drawn by Slides instead of following the SVG path exactly.
+	ConnectCurves bool
 }
 
 // Mapper walks the SVG tree and accumulates Slides requests.
@@ -48,6 +52,19 @@ type Mapper struct {
 	textSkip   map[*svgpkg.Element]bool       // texts absorbed by a group
 
 	images []EmbeddedImage
+
+	pendingTexts []*pendingText
+	pendingEdges []*pendingEdge
+	attachable   []attachLine               // straight connectors eligible for attachment
+	elemShape    map[*svgpkg.Element]string // SVG element → shape object ID
+	byID         map[string]*svgpkg.Element // SVG id attribute → element
+	inLink       bool                       // mapping the fallback of a link group
+}
+
+// attachLine is a single straight connector (EMU endpoints).
+type attachLine struct {
+	id     string
+	p0, p1 pt
 }
 
 // New creates a Mapper.
@@ -62,9 +79,17 @@ func New(cfg Config, sheet *svgpkg.Stylesheet) *Mapper {
 func (m *Mapper) Map(root *svgpkg.Element) ([]*slides.Request, []string) {
 	m.grads = collectGradients(root)
 	m.planTextGroups(root)
+	m.elemShape = map[*svgpkg.Element]string{}
+	m.byID = map[string]*svgpkg.Element{}
+	root.Walk(func(e *svgpkg.Element) {
+		if id := e.ID(); id != "" {
+			m.byID[id] = e
+		}
+	})
 	for _, c := range root.Children {
 		m.walk(c, svgpkg.Identity())
 	}
+	m.finalize()
 	if m.bgSet {
 		m.reqs = append(m.reqs, &slides.Request{UpdatePageProperties: &slides.UpdatePagePropertiesRequest{
 			ObjectId: m.cfg.SlideID,
@@ -97,6 +122,10 @@ func (m *Mapper) walk(e *svgpkg.Element, parent svgpkg.Matrix) {
 
 	switch e.Tag {
 	case "g":
+		if m.cfg.ConnectCurves && !m.inLink && e.Attr("data-entity-1") != "" && e.Attr("data-entity-2") != "" {
+			m.mapLinkGroup(e, mat)
+			return
+		}
 		if m.map3DBox(e, mat) {
 			return
 		}
@@ -592,7 +621,14 @@ func bbox(pts [][2]float64) (minX, minY, w, h float64) {
 func (m *Mapper) mapLine(e *svgpkg.Element, mat svgpkg.Matrix) {
 	x1, y1 := mat.Apply(e.FloatAttr("x1", 0), e.FloatAttr("y1", 0))
 	x2, y2 := mat.Apply(e.FloatAttr("x2", 0), e.FloatAttr("y2", 0))
-	m.createLine(e, "STRAIGHT", x1, y1, x2, y2, mat)
+	id := m.createLine(e, "STRAIGHT", x1, y1, x2, y2, mat)
+	m.markAttachable(id, x1, y1, x2, y2)
+}
+
+func (m *Mapper) markAttachable(id string, x1, y1, x2, y2 float64) {
+	ex1, ey1 := m.toEMU(x1, y1)
+	ex2, ey2 := m.toEMU(x2, y2)
+	m.attachable = append(m.attachable, attachLine{id: id, p0: pt{ex1, ey1}, p1: pt{ex2, ey2}})
 }
 
 func (m *Mapper) mapPath(e *svgpkg.Element, mat svgpkg.Matrix) {
@@ -698,6 +734,30 @@ func (m *Mapper) mapPath(e *svgpkg.Element, mat svgpkg.Matrix) {
 		return
 	}
 	pieces = mergeCollinear(pieces)
+	if m.cfg.ConnectCurves && !m.inLink {
+		first, last := pieces[0], pieces[len(pieces)-1]
+		p0, p1 := first.p0, last.p1
+		if !first.arc && !last.arc {
+			fb := m.captureReqs(func() { m.emitPathPieces(e, pieces, mat) })
+			x0, y0 := mat.Apply(p0[0], p0[1])
+			x1, y1 := mat.Apply(p1[0], p1[1])
+			ex0, ey0 := m.toEMU(x0, y0)
+			ex1, ey1 := m.toEMU(x1, y1)
+			m.pendingEdges = append(m.pendingEdges, &pendingEdge{
+				slot: len(m.reqs), el: e, fallback: fb,
+				p0: pt{ex0, ey0}, p1: pt{ex1, ey1},
+				straight:   len(pieces) == 1 && pieces[0].category == "STRAIGHT",
+				startArrow: e.Attr("marker-start") != "", endArrow: e.Attr("marker-end") != "",
+			})
+			m.reqs = append(m.reqs, nil)
+			return
+		}
+	}
+	m.emitPathPieces(e, pieces, mat)
+}
+
+// emitPathPieces draws the pieces of an open path, grouped when several.
+func (m *Mapper) emitPathPieces(e *svgpkg.Element, pieces []pathPiece, mat svgpkg.Matrix) {
 	var ids []string
 	for i, p := range pieces {
 		if p.arc {
@@ -708,7 +768,11 @@ func (m *Mapper) mapPath(e *svgpkg.Element, mat svgpkg.Matrix) {
 		x2, y2 := mat.Apply(p.p1[0], p.p1[1])
 		// Markers: the start arrow on the first piece, the end arrow on
 		// the last one.
-		ids = append(ids, m.createLinePieceMarkers(e, p.category, x1, y1, x2, y2, i == 0, i == len(pieces)-1, mat))
+		id := m.createLinePieceMarkers(e, p.category, x1, y1, x2, y2, i == 0, i == len(pieces)-1, mat)
+		ids = append(ids, id)
+		if len(pieces) == 1 && p.category == "STRAIGHT" {
+			m.markAttachable(id, x1, y1, x2, y2)
+		}
 	}
 	if len(ids) > 1 {
 		// One path = one editable object.
@@ -797,8 +861,8 @@ func (m *Mapper) emitArc(e *svgpkg.Element, p pathPiece, mat svgpkg.Matrix) stri
 	return id
 }
 
-func (m *Mapper) createLine(e *svgpkg.Element, category string, x1, y1, x2, y2 float64, mat svgpkg.Matrix) {
-	m.createLinePiece(e, category, x1, y1, x2, y2, true, mat)
+func (m *Mapper) createLine(e *svgpkg.Element, category string, x1, y1, x2, y2 float64, mat svgpkg.Matrix) string {
+	return m.createLinePiece(e, category, x1, y1, x2, y2, true, mat)
 }
 
 func (m *Mapper) createLinePiece(e *svgpkg.Element, category string, x1, y1, x2, y2 float64, withMarker bool, mat svgpkg.Matrix) string {
