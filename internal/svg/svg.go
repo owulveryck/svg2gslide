@@ -77,7 +77,8 @@ var inlineStyleProps = map[string]bool{
 	"stroke-opacity": true, "fill": true, "fill-opacity": true,
 	"opacity": true, "font-family": true, "font-size": true,
 	"font-weight": true, "font-style": true, "text-anchor": true,
-	"visibility": true, "display": true,
+	"visibility": true, "display": true, "letter-spacing": true,
+	"stop-color": true, "stop-opacity": true, "dominant-baseline": true,
 }
 
 // mergeInlineStyle folds style="k:v;..." declarations into the attribute map.
@@ -113,6 +114,55 @@ func (e *Element) FloatAttr(name string, def float64) float64 {
 		return def
 	}
 	return f
+}
+
+// inheritedProps lists the presentation properties that inherit from
+// ancestors per the SVG spec (opacity is not inherited: it composes, see
+// the mapper).
+var inheritedProps = map[string]bool{
+	"fill": true, "fill-opacity": true, "stroke": true, "stroke-width": true,
+	"stroke-dasharray": true, "stroke-opacity": true, "font-family": true,
+	"font-size": true, "font-weight": true, "font-style": true,
+	"text-anchor": true, "letter-spacing": true, "visibility": true,
+}
+
+// Inherited returns the attribute value, looking up the ancestor chain for
+// inheritable presentation properties. Returns "" if unset everywhere.
+func (e *Element) Inherited(name string) string {
+	if !inheritedProps[name] {
+		return e.Attrs[name]
+	}
+	for cur := e; cur != nil; cur = cur.Parent {
+		if v, ok := cur.Attrs[name]; ok && v != "inherit" {
+			return v
+		}
+	}
+	return ""
+}
+
+// InheritedFloat is Inherited parsed as float64 (a trailing "px" is
+// accepted), or def if absent/invalid.
+func (e *Element) InheritedFloat(name string, def float64) float64 {
+	v := strings.TrimSuffix(strings.TrimSpace(e.Inherited(name)), "px")
+	if v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return def
+	}
+	return f
+}
+
+// ID returns the element id attribute.
+func (e *Element) ID() string { return e.Attrs["id"] }
+
+// Walk calls fn for e and every descendant, depth-first.
+func (e *Element) Walk(fn func(*Element)) {
+	fn(e)
+	for _, c := range e.Children {
+		c.Walk(fn)
+	}
 }
 
 // Classes returns the space-separated class list of the element.

@@ -5,7 +5,6 @@ package mapper
 import (
 	"fmt"
 	"math"
-	"strconv"
 	"strings"
 
 	"google.golang.org/api/slides/v1"
@@ -44,6 +43,10 @@ type Mapper struct {
 	reqs     []*slides.Request
 	warnings []string
 	n        int
+
+	grads  map[string]*gradient
+	pageBG rgba // current page background (composited full-page layers)
+	bgSet  bool
 }
 
 // New creates a Mapper.
@@ -51,13 +54,23 @@ func New(cfg Config, sheet *svgpkg.Stylesheet) *Mapper {
 	if cfg.FontFamily == "" {
 		cfg.FontFamily = "Arial"
 	}
-	return &Mapper{cfg: cfg, sheet: sheet}
+	return &Mapper{cfg: cfg, sheet: sheet, pageBG: white, grads: map[string]*gradient{}}
 }
 
 // Map converts the SVG root into Slides requests targeting cfg.SlideID.
 func (m *Mapper) Map(root *svgpkg.Element) ([]*slides.Request, []string) {
+	m.grads = collectGradients(root)
 	for _, c := range root.Children {
 		m.walk(c, svgpkg.Identity())
+	}
+	if m.bgSet {
+		m.reqs = append(m.reqs, &slides.Request{UpdatePageProperties: &slides.UpdatePagePropertiesRequest{
+			ObjectId: m.cfg.SlideID,
+			PageProperties: &slides.PageProperties{PageBackgroundFill: &slides.PageBackgroundFill{
+				SolidFill: &slides.SolidFill{Color: m.pageBG.opaque(), Alpha: 1},
+			}},
+			Fields: "pageBackgroundFill.solidFill",
+		}})
 	}
 	return m.reqs, m.warnings
 }
@@ -150,15 +163,17 @@ func (m *Mapper) mapRect(e *svgpkg.Element, mat svgpkg.Matrix) {
 		return
 	}
 	// Fully transparent, stroke-less rectangles are hitbox/spacer helpers.
-	if s := e.Attr("stroke"); (s == "" || s == "none") && e.FloatAttr("fill-opacity", 1) <= 0.01 {
+	stroke := e.Inherited("stroke")
+	noStroke := stroke == "" || stroke == "none"
+	if noStroke && e.InheritedFloat("fill-opacity", 1) <= 0.01 {
 		return
 	}
-	// The full-canvas background rectangle would only get in the way of
-	// editing; the slide background is already white.
+	// A full-canvas background rectangle becomes the page background:
+	// it would only get in the way of editing as a shape.
 	vb := m.cfg.ViewBox
 	if e.Attr("class") == "" && math.Abs(x-vb.X) < 1 && math.Abs(y-vb.Y) < 1 &&
-		w >= vb.W*0.95 && h >= vb.H*0.95 && e.Attr("stroke") == "" {
-		m.warnf("rectangle de fond pleine page ignoré")
+		w >= vb.W*0.95 && h >= vb.H*0.95 && noStroke {
+		m.absorbBackground(e)
 		return
 	}
 	shapeType := "RECTANGLE"
@@ -258,9 +273,9 @@ func (m *Mapper) mapCylinder(e *svgpkg.Element, mat svgpkg.Matrix) bool {
 			}
 		}
 		switch {
-		case cubics >= 2 && isFilled(c) && body == nil:
+		case cubics >= 2 && m.isFilled(c) && body == nil:
 			body = c
-		case cubics >= 1 && !isFilled(c) && lid == nil:
+		case cubics >= 1 && !m.isFilled(c) && lid == nil:
 			lid = c
 		default:
 			return false
@@ -545,7 +560,7 @@ func (m *Mapper) mapLine(e *svgpkg.Element, mat svgpkg.Matrix) {
 }
 
 func (m *Mapper) mapPath(e *svgpkg.Element, mat svgpkg.Matrix) {
-	if e.Attr("fill") == "none" && (e.Attr("stroke") == "none" || e.Attr("stroke") == "") {
+	if f := e.Inherited("fill"); f == "none" && (e.Inherited("stroke") == "none" || e.Inherited("stroke") == "") {
 		return // invisible motion-path rail
 	}
 	segs, err := svgpkg.ParsePathD(e.Attr("d"))
@@ -633,7 +648,7 @@ func (m *Mapper) mapPath(e *svgpkg.Element, mat svgpkg.Matrix) {
 	}
 	// A closed, filled path is a free-form solid: keep its footprint as a
 	// rounded rectangle rather than exploding it into stray connectors.
-	if closed && isFilled(e) {
+	if closed && m.isFilled(e) {
 		tpts := applyAll(mat, outline)
 		minX, minY, w, h := bbox(tpts)
 		id := m.nextID()
@@ -715,12 +730,6 @@ func cubicPieces(p0, c1, c2, p1 [2]float64) []pathPiece {
 		}
 	}
 	return []pathPiece{{category: "CURVED", p0: p0, p1: p1}}
-}
-
-// isFilled reports whether the element paints its interior.
-func isFilled(e *svgpkg.Element) bool {
-	_, ok := parseColor(e.Attr("fill"))
-	return ok && e.FloatAttr("fill-opacity", 1) > 0.01
 }
 
 // quarterArcPiece recognizes a circular 90° arc whose endpoints are axis
@@ -840,17 +849,16 @@ func (m *Mapper) createLinePiece(e *svgpkg.Element, category string, x1, y1, x2,
 
 	props := &slides.LineProperties{}
 	var fields []string
-	stroke := e.Attr("stroke")
-	if c, ok := parseColor(stroke); ok {
-		props.LineFill = &slides.LineFill{SolidFill: &slides.SolidFill{Color: c, Alpha: strokeAlpha(e)}}
+	if c, alpha, ok := m.strokePaint(e); ok {
+		props.LineFill = &slides.LineFill{SolidFill: &slides.SolidFill{Color: c.opaque(), Alpha: alpha}}
 		fields = append(fields, "lineFill.solidFill")
 	}
-	if sw := e.FloatAttr("stroke-width", 1); sw > 0 {
+	if sw := e.InheritedFloat("stroke-width", 1); sw > 0 {
 		props.Weight = &slides.Dimension{Magnitude: m.lenEMU(sw * avgScale(mat)), Unit: "EMU"}
 		fields = append(fields, "weight")
 	}
-	if e.Attr("stroke-dasharray") != "" {
-		props.DashStyle = "DASH"
+	if dash := e.Inherited("stroke-dasharray"); dash != "" && dash != "none" {
+		props.DashStyle = dashStyle(dash)
 		fields = append(fields, "dashStyle")
 	}
 	if withMarker && e.Attr("marker-end") != "" {
@@ -931,10 +939,8 @@ func (m *Mapper) mapText(e *svgpkg.Element, mat svgpkg.Matrix) {
 		ForceSendFields: []string{"Bold", "Italic"},
 	}
 	fields := []string{"fontFamily", "fontSize", "bold", "italic"}
-	if c, ok := parseColor(e.Attr("fill")); ok {
-		style.ForegroundColor = &slides.OptionalColor{OpaqueColor: c}
-		fields = append(fields, "foregroundColor")
-	}
+	style.ForegroundColor = &slides.OptionalColor{OpaqueColor: m.textColor(e).opaque()}
+	fields = append(fields, "foregroundColor")
 	m.reqs = append(m.reqs, &slides.Request{UpdateTextStyle: &slides.UpdateTextStyleRequest{
 		ObjectId:  id,
 		Style:     style,
@@ -1032,89 +1038,4 @@ func (m *Mapper) createShape(id, shapeType string, x, y, w, h, rotDeg float64) {
 func avgScale(mat svgpkg.Matrix) float64 {
 	sx, sy := mat.ScaleFactors()
 	return (sx + sy) / 2
-}
-
-// styleShape applies fill and outline from the SVG presentation attributes.
-func (m *Mapper) styleShape(id string, e *svgpkg.Element, mat svgpkg.Matrix) {
-	props := &slides.ShapeProperties{}
-	var fields []string
-
-	fill := e.Attr("fill")
-	if fill == "none" {
-		props.ShapeBackgroundFill = &slides.ShapeBackgroundFill{PropertyState: "NOT_RENDERED"}
-		fields = append(fields, "shapeBackgroundFill.propertyState")
-	} else if c, ok := parseColor(fill); ok {
-		alpha := e.FloatAttr("fill-opacity", 1)
-		props.ShapeBackgroundFill = &slides.ShapeBackgroundFill{
-			SolidFill: &slides.SolidFill{Color: c, Alpha: alpha},
-		}
-		fields = append(fields, "shapeBackgroundFill.solidFill")
-	}
-
-	stroke := e.Attr("stroke")
-	if stroke == "" || stroke == "none" {
-		props.Outline = &slides.Outline{PropertyState: "NOT_RENDERED"}
-		fields = append(fields, "outline.propertyState")
-	} else if c, ok := parseColor(stroke); ok {
-		props.Outline = &slides.Outline{
-			OutlineFill: &slides.OutlineFill{SolidFill: &slides.SolidFill{Color: c, Alpha: strokeAlpha(e)}},
-			Weight:      &slides.Dimension{Magnitude: m.lenEMU(e.FloatAttr("stroke-width", 1) * avgScale(mat)), Unit: "EMU"},
-		}
-		fields = append(fields, "outline.outlineFill.solidFill", "outline.weight")
-		if e.Attr("stroke-dasharray") != "" {
-			props.Outline.DashStyle = "DASH"
-			fields = append(fields, "outline.dashStyle")
-		}
-	}
-
-	if len(fields) == 0 {
-		return
-	}
-	m.reqs = append(m.reqs, &slides.Request{UpdateShapeProperties: &slides.UpdateShapePropertiesRequest{
-		ObjectId:        id,
-		ShapeProperties: props,
-		Fields:          strings.Join(fields, ","),
-	}})
-}
-
-func strokeAlpha(e *svgpkg.Element) float64 {
-	return e.FloatAttr("stroke-opacity", 1)
-}
-
-var namedColors = map[string]string{
-	"white": "#ffffff",
-	"black": "#000000",
-	"red":   "#ff0000",
-	"green": "#008000",
-	"blue":  "#0000ff",
-}
-
-func parseColor(s string) (*slides.OpaqueColor, bool) {
-	s = strings.TrimSpace(strings.ToLower(s))
-	if s == "" || s == "none" || strings.HasPrefix(s, "url(") {
-		return nil, false
-	}
-	if hex, ok := namedColors[s]; ok {
-		s = hex
-	}
-	if !strings.HasPrefix(s, "#") {
-		return nil, false
-	}
-	hex := s[1:]
-	if len(hex) == 3 {
-		hex = string([]byte{hex[0], hex[0], hex[1], hex[1], hex[2], hex[2]})
-	}
-	if len(hex) != 6 {
-		return nil, false
-	}
-	v, err := strconv.ParseUint(hex, 16, 32)
-	if err != nil {
-		return nil, false
-	}
-	return &slides.OpaqueColor{RgbColor: &slides.RgbColor{
-		Red:             float64(v>>16&0xff) / 255,
-		Green:           float64(v>>8&0xff) / 255,
-		Blue:            float64(v&0xff) / 255,
-		ForceSendFields: []string{"Red", "Green", "Blue"},
-	}}, true
 }
