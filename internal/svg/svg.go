@@ -206,6 +206,10 @@ func (e *Element) appendText(b *strings.Builder) {
 	}
 }
 
+// Content returns the element's character data (string) and child elements
+// (*Element) in document order.
+func (e *Element) Content() []any { return e.seq }
+
 // Find returns the first descendant (depth-first) with the given tag.
 func (e *Element) Find(tag string) *Element {
 	for _, c := range e.Children {

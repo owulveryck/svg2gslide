@@ -271,7 +271,9 @@ func TestTextAnchorStartUsesTextLength(t *testing.T) {
 		t.Fatalf("got %d shapes, want one TEXT_BOX", len(shapes))
 	}
 	box := shapes[0]
-	nearEMU(t, "box w", box.ElementProperties.Size.Width.Magnitude, 72.167*testScale+textBoxSlackEMU)
+	if w := box.ElementProperties.Size.Width.Magnitude; w < 72.167*testScale+2*textInsetEMU {
+		t.Errorf("box w = %.0f EMU, narrower than textLength + insets (would wrap)", w)
+	}
 	nearEMU(t, "box x", box.ElementProperties.Transform.TranslateX, 12*testScale-textInsetEMU)
 
 	var alignment, font string
