@@ -67,8 +67,9 @@ async function fetchUserEmail() {
 function setFile(file) {
   if (!file) return;
   const looksSvg = file.type === "image/svg+xml" || /\.svg$/i.test(file.name);
-  if (!looksSvg) {
-    setStatus(`"${file.name}" doesn't look like an SVG file.`, true);
+  const looksHtml = file.type === "text/html" || /\.html?$/i.test(file.name);
+  if (!looksSvg && !looksHtml) {
+    setStatus(`"${file.name}" doesn't look like an SVG or HTML file.`, true);
     return;
   }
   selectedFile = file;
@@ -201,21 +202,44 @@ async function runConvert() {
   convertBtn.disabled = true;
   setStatus("Converting " + selectedFile.name + "…");
   try {
-    const svgText = await selectedFile.text();
-    const res = await svg2gslideConvert(svgText, presUrlInput.value, accessToken, "");
+    // An HTML deck yields one SVG per slide; a bare SVG yields itself.
+    const svgs = svg2gslideSplit(await selectedFile.text());
+    if (svgs instanceof Error) throw svgs;
+    if (!svgs.length) throw new Error("no inline <svg> found in " + selectedFile.name);
+    let first = null;
+    const warnings = [];
+    for (const [i, s] of svgs.entries()) {
+      const name = s.index ? `#${s.index}${s.title ? " (" + s.title + ")" : ""}` : selectedFile.name;
+      if (svgs.length > 1) setStatus(`Converting slide ${i + 1}/${svgs.length} ${name}…`);
+      let res;
+      try {
+        res = await svg2gslideConvert(s.svg, presUrlInput.value, accessToken, "");
+      } catch (err) {
+        // A slide that fails to convert must not abort the deck, but an
+        // API error (auth, quota, bad presentation) does.
+        if (svgs.length === 1 || (err && err.status)) throw err;
+        warnings.push(`${name}: skipped — ${err.message || err}`);
+        continue;
+      }
+      first = first || res;
+      warnings.push(...res.warnings.map((w) => (svgs.length > 1 ? `${name}: ${w}` : w)));
+    }
+    if (!first) throw new Error("no slide could be converted");
     const link = document.createElement("a");
-    link.href = res.slideUrl;
+    link.href = first.slideUrl;
     link.target = "_blank";
     link.rel = "noopener";
-    link.textContent = "Open the new slide";
+    link.textContent = svgs.length > 1 ? "Open the first new slide" : "Open the new slide";
     setStatus("");
     statusEl.append(
-      `Slide ${res.slideId} created (${res.requestCount} requests, phase "${res.phase}"). `,
+      svgs.length > 1
+        ? `${svgs.length} slides converted. `
+        : `Slide ${first.slideId} created (${first.requestCount} requests, phase "${first.phase}"). `,
       link
     );
-    if (res.warnings.length) {
+    if (warnings.length) {
       warningsEl.textContent =
-        "Approximations:\n" + res.warnings.map((w) => "  • " + w).join("\n");
+        "Approximations:\n" + warnings.map((w) => "  • " + w).join("\n");
     }
   } catch (err) {
     if (err && err.status === 401) {

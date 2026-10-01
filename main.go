@@ -1,27 +1,32 @@
 // Command svg2gslide converts an SVG file into a new slide made of native,
 // editable Google Slides objects (shapes, lines, text boxes), appended to an
-// existing presentation.
+// existing presentation. Given an HTML page instead, it converts each inline
+// <svg> (one per slide of an HTML deck) into its own slide, in order.
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"google.golang.org/api/slides/v1"
 
 	"github.com/owulveryck/svg2gslide/internal/convert"
 	"github.com/owulveryck/svg2gslide/internal/gslide"
+	"github.com/owulveryck/svg2gslide/internal/htmlsvg"
 	"github.com/owulveryck/svg2gslide/internal/mapper"
 )
 
 func main() {
 	var (
-		svgPath      = flag.String("svg", "", "input SVG file (default: stdin)")
+		svgPath      = flag.String("svg", "", "input SVG file, or HTML page with inline SVGs (one slide each) (default: stdin)")
+		slideSel     = flag.String("slides", "", "HTML input only: SVGs to convert, 1-based, e.g. \"1-3,7,10-\" (default: all)")
 		presentation = flag.String("presentation", "", "target Google Slides presentation ID (required)")
 		credentials  = flag.String("credentials", "", "OAuth client or service account JSON (default: $SLIDES_CREDENTIALS)")
 		phase        = flag.String("phase", "", "active phase (default: the SVG's data-active-phase attribute)")
@@ -35,7 +40,7 @@ func main() {
 	flag.Parse()
 
 	if *dryRun {
-		if err := dry(*svgPath, *phase, *verbose, *textTf, *connect); err != nil {
+		if err := dry(*svgPath, *slideSel, *phase, *verbose, *textTf, *connect); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
@@ -52,29 +57,16 @@ func main() {
 			os.Exit(2)
 		}
 	}
-	if err := run(context.Background(), *svgPath, *presentation, *credentials, *phase, *outThumbnail, *exportPDF, *verbose, *textTf, *connect); err != nil {
+	if err := run(context.Background(), *svgPath, *slideSel, *presentation, *credentials, *phase, *outThumbnail, *exportPDF, *verbose, *textTf, *connect); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, svgPath, presentationID, credentials, phase, outThumbnail, exportPDF string, verbose, textTransform, connect bool) error {
-	var (
-		r     io.Reader
-		label = svgPath
-	)
-	if svgPath == "" {
-		r = os.Stdin
-		label = "<stdin>"
-	} else {
-		f, err := os.Open(svgPath)
-		if err != nil {
-			return err
-		}
-		defer func() {
-			_ = f.Close()
-		}()
-		r = f
+func run(ctx context.Context, svgPath, slideSel, presentationID, credentials, phase, outThumbnail, exportPDF string, verbose, textTransform, connect bool) error {
+	sources, err := loadSources(svgPath, slideSel)
+	if err != nil {
+		return err
 	}
 
 	if credentials == "" {
@@ -101,26 +93,60 @@ func run(ctx context.Context, svgPath, presentationID, credentials, phase, outTh
 		return err
 	}
 
-	res, err := convert.Convert(convert.Input{
-		SVG:     r,
-		Label:   label,
-		PageW:   pageW,
-		PageH:   pageH,
-		Phase:   phase,
-		Verbose: verbose,
+	for _, src := range sources {
+		res, err := convert.Convert(convert.Input{
+			SVG:     bytes.NewReader(src.data),
+			Label:   src.label,
+			PageW:   pageW,
+			PageH:   pageH,
+			Phase:   phase,
+			Verbose: verbose,
 
-		TextTransform: textTransform,
-		ConnectCurves: connect,
-	})
-	if err != nil {
-		return err
-	}
-	if verbose {
-		for _, w := range res.Warnings {
-			fmt.Fprintln(os.Stderr, "  [approx]", w)
+			TextTransform: textTransform,
+			ConnectCurves: connect,
+		})
+		if err != nil {
+			if len(sources) == 1 {
+				return err
+			}
+			// One unconvertible SVG must not abort the rest of the deck.
+			fmt.Fprintln(os.Stderr, "warning: skipped:", err)
+			continue
+		}
+		if verbose {
+			for _, w := range res.Warnings {
+				fmt.Fprintln(os.Stderr, "  [approx]", w)
+			}
+		}
+		if err := appendSlide(ctx, client, presentationID, res); err != nil {
+			return fmt.Errorf("%s: %w", src.label, err)
+		}
+		fmt.Printf("%s: slide %s created (%d requests, phase %q)\n", src.label, res.SlideID, len(res.Requests), res.Phase)
+		fmt.Printf("https://docs.google.com/presentation/d/%s/edit#slide=id.%s\n", presentationID, res.SlideID)
+
+		if outThumbnail != "" {
+			path := outThumbnail
+			if len(sources) > 1 {
+				ext := filepath.Ext(path)
+				path = fmt.Sprintf("%s-%02d%s", strings.TrimSuffix(path, ext), src.index, ext)
+			}
+			if err := client.FetchSlideThumbnail(ctx, presentationID, res.SlideID, path); err != nil {
+				return err
+			}
+			fmt.Println("thumbnail:", path)
 		}
 	}
+	if exportPDF != "" {
+		if err := client.ExportPDF(ctx, presentationID, exportPDF); err != nil {
+			return err
+		}
+		fmt.Println("pdf:", exportPDF)
+	}
+	return nil
+}
 
+// appendSlide sends the conversion result to the presentation.
+func appendSlide(ctx context.Context, client *gslide.Client, presentationID string, res *convert.Result) error {
 	// Embedded images are inserted in a second pass: they need hosting,
 	// and a failure there must not lose the slide.
 	var imageReqs []*slides.Request
@@ -143,33 +169,119 @@ func run(ctx context.Context, svgPath, presentationID, credentials, phase, outTh
 			fmt.Fprintln(os.Stderr, "warning: embedded images skipped:", err)
 		}
 	}
-	fmt.Printf("slide %s created (%d requests, phase %q)\n", res.SlideID, len(res.Requests), res.Phase)
-	fmt.Printf("https://docs.google.com/presentation/d/%s/edit#slide=id.%s\n", presentationID, res.SlideID)
+	return nil
+}
 
-	if outThumbnail != "" {
-		if err := client.FetchSlideThumbnail(ctx, presentationID, res.SlideID, outThumbnail); err != nil {
-			return err
-		}
-		fmt.Println("thumbnail:", outThumbnail)
+// source is one SVG document to turn into a slide.
+type source struct {
+	index int // 1-based position in an HTML input, 0 for a bare SVG
+	label string
+	data  []byte
+}
+
+// loadSources reads the input (file or stdin): a bare SVG gives one source,
+// an HTML page one source per selected inline SVG.
+func loadSources(path, slideSel string) ([]source, error) {
+	var (
+		data  []byte
+		err   error
+		label = path
+	)
+	if path == "" {
+		data, err = io.ReadAll(os.Stdin)
+		label = "<stdin>"
+	} else {
+		data, err = os.ReadFile(path)
 	}
-	if exportPDF != "" {
-		if err := client.ExportPDF(ctx, presentationID, exportPDF); err != nil {
-			return err
+	if err != nil {
+		return nil, err
+	}
+	if !htmlsvg.IsHTML(data) {
+		if slideSel != "" {
+			return nil, fmt.Errorf("-slides requires an HTML input")
 		}
-		fmt.Println("pdf:", exportPDF)
+		return []source{{label: label, data: data}}, nil
+	}
+
+	svgs, err := htmlsvg.Extract(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", label, err)
+	}
+	keep, err := parseSelection(slideSel)
+	if err != nil {
+		return nil, err
+	}
+	var out []source
+	for _, s := range svgs {
+		if !keep(s.Index) {
+			continue
+		}
+		l := fmt.Sprintf("%s#%d", label, s.Index)
+		if s.Title != "" {
+			l += " (" + s.Title + ")"
+		}
+		out = append(out, source{index: s.Index, label: l, data: s.Data})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%s: no inline <svg> selected (%d found)", label, len(svgs))
+	}
+	return out, nil
+}
+
+// parseSelection parses a list of 1-based indexes and ranges ("1-3,7,10-").
+func parseSelection(sel string) (func(int) bool, error) {
+	if strings.TrimSpace(sel) == "" {
+		return func(int) bool { return true }, nil
+	}
+	type span struct{ lo, hi int }
+	var spans []span
+	for part := range strings.SplitSeq(sel, ",") {
+		part = strings.TrimSpace(part)
+		loS, hiS, isRange := strings.Cut(part, "-")
+		lo, err := strconv.Atoi(loS)
+		if err != nil || lo < 1 {
+			return nil, fmt.Errorf("-slides: invalid item %q", part)
+		}
+		hi := lo
+		if isRange {
+			if hiS == "" {
+				hi = int(^uint(0) >> 1)
+			} else if hi, err = strconv.Atoi(hiS); err != nil || hi < lo {
+				return nil, fmt.Errorf("-slides: invalid range %q", part)
+			}
+		}
+		spans = append(spans, span{lo, hi})
+	}
+	return func(i int) bool {
+		for _, s := range spans {
+			if i >= s.lo && i <= s.hi {
+				return true
+			}
+		}
+		return false
+	}, nil
+}
+
+// dry converts each SVG against a default 16:9 page and prints what would
+// be created.
+func dry(svgPath, slideSel, phase string, verbose, textTransform, connect bool) error {
+	sources, err := loadSources(svgPath, slideSel)
+	if err != nil {
+		return err
+	}
+	for _, src := range sources {
+		if err := dryOne(src, phase, verbose, textTransform, connect); err != nil {
+			if len(sources) == 1 {
+				return err
+			}
+			fmt.Fprintln(os.Stderr, "warning: skipped:", err)
+		}
 	}
 	return nil
 }
 
-// dry converts the SVG against a default 16:9 page and prints what would be
-// created, one line per text box.
-func dry(svgPath, phase string, verbose, textTransform, connect bool) error {
-	f, err := os.Open(svgPath)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-	res, err := convert.Convert(convert.Input{SVG: f, Label: svgPath, PageW: 9144000, PageH: 5143500, Phase: phase, Verbose: verbose, TextTransform: textTransform, ConnectCurves: connect})
+func dryOne(src source, phase string, verbose, textTransform, connect bool) error {
+	res, err := convert.Convert(convert.Input{SVG: bytes.NewReader(src.data), Label: src.label, PageW: 9144000, PageH: 5143500, Phase: phase, Verbose: verbose, TextTransform: textTransform, ConnectCurves: connect})
 	if err != nil {
 		return err
 	}
@@ -205,7 +317,7 @@ func dry(svgPath, phase string, verbose, textTransform, connect bool) error {
 		}
 	}
 	fmt.Printf("%s: %d requests, textboxes=%d, text-in-shapes=%d, connections=%d, groups=%d, shapes/lines=%v\n",
-		svgPath, len(res.Requests), counts["TEXT_BOX"], inShape, conns, groups, counts)
+		src.label, len(res.Requests), counts["TEXT_BOX"], inShape, conns, groups, counts)
 	if verbose {
 		for _, w := range res.Warnings {
 			fmt.Fprintln(os.Stderr, "  [approx]", w)

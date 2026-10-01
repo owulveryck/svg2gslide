@@ -19,15 +19,27 @@ The SVG can also be piped on stdin:
 cat testdata/sdlc-phase-8.svg | go run . -presentation <PRESENTATION_ID>
 ```
 
+An HTML page with inline SVGs (e.g. an HTML slide deck) is detected
+automatically: each `<svg>` becomes one slide, appended in document order.
+When some SVGs sit inside a slide container (`<section>` or `class="slide"`),
+only those are converted — UI icons (buttons, toolbars) are ignored.
+
+```sh
+go run . -svg deck.html -presentation <PRESENTATION_ID>              # all slides
+go run . -svg deck.html -presentation <PRESENTATION_ID> -slides 1-3,7  # a selection
+go run . -svg deck.html -dry-run                                     # one stats line per slide
+```
+
 Flags:
 
 | Flag | Description |
 |---|---|
-| `-svg` | input SVG file (default: stdin) |
+| `-svg` | input SVG file, or HTML page with inline SVGs (default: stdin) |
+| `-slides` | HTML input only: SVGs to convert, 1-based (`1-3,7,10-`; default: all) |
 | `-presentation` | target presentation ID (required) |
 | `-credentials` | OAuth client or service account JSON (default: `$SLIDES_CREDENTIALS`, then `~/.config/gcloud/slideappscripter-client.json`) |
 | `-phase` | force the active phase (default: the SVG's `data-active-phase` attribute) |
-| `-out-thumbnail` | download the new slide's PNG thumbnail to this path |
+| `-out-thumbnail` | download the new slide's PNG thumbnail to this path (`name-NN.png` per slide for an HTML input) |
 | `-export-pdf` | export the whole presentation as PDF |
 | `-text-transform` | apply CSS `text-transform` (uppercase…) like browsers; off by default, like librsvg/resvg |
 | `-connect-curves` | replace edges between two shapes (PlantUML links, open curved paths) by one connector attached to both shapes (routed by Slides) |
@@ -45,7 +57,7 @@ go run ./cmd/presctl -presentation <ID> -delete-slide <ID1>,<ID2> -export-pdf /t
 ## Web frontend (WebAssembly)
 
 The same conversion pipeline runs entirely in the browser: sign in with
-Google, pick an SVG, paste the presentation URL, convert. No server-side
+Google, pick an SVG (or an HTML page with inline SVGs, one slide each), paste the presentation URL, convert. No server-side
 component — the page talks directly to the Slides REST API.
 
 ### One-time Google Cloud setup

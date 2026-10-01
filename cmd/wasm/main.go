@@ -1,7 +1,10 @@
 // Command wasm is the browser entrypoint of svg2gslide. Compiled with
 // GOOS=js GOARCH=wasm, it exposes a global svg2gslideConvert(svgText,
 // presentationUrlOrId, accessToken, phase) function returning a Promise
-// that resolves to {slideId, slideUrl, phase, requestCount, warnings}.
+// that resolves to {slideId, slideUrl, phase, requestCount, warnings}, and
+// svg2gslideSplit(text) returning the SVGs to convert as [{index, title,
+// svg}] (or an Error): the document itself for an SVG, each inline <svg> for
+// an HTML page.
 //
 //go:build js && wasm
 
@@ -18,6 +21,7 @@ import (
 
 	"github.com/owulveryck/svg2gslide/internal/convert"
 	"github.com/owulveryck/svg2gslide/internal/gslide"
+	"github.com/owulveryck/svg2gslide/internal/htmlsvg"
 )
 
 func convertFunc(this js.Value, args []js.Value) any {
@@ -101,8 +105,29 @@ func convertFunc(this js.Value, args []js.Value) any {
 	return js.Global().Get("Promise").New(executor)
 }
 
+func splitFunc(this js.Value, args []js.Value) any {
+	// No panics here: a panic in a js.FuncOf callback kills the Go runtime.
+	if len(args) < 1 {
+		return js.Global().Get("Error").New("svg2gslideSplit(text)")
+	}
+	text := args[0].String()
+	if !htmlsvg.IsHTML([]byte(text)) {
+		return js.ValueOf([]any{map[string]any{"index": 0, "title": "", "svg": text}})
+	}
+	svgs, err := htmlsvg.Extract(strings.NewReader(text))
+	if err != nil {
+		return js.Global().Get("Error").New(err.Error())
+	}
+	out := make([]any, len(svgs))
+	for i, s := range svgs {
+		out[i] = map[string]any{"index": s.Index, "title": s.Title, "svg": string(s.Data)}
+	}
+	return js.ValueOf(out)
+}
+
 func main() {
 	js.Global().Set("svg2gslideConvert", js.FuncOf(convertFunc))
+	js.Global().Set("svg2gslideSplit", js.FuncOf(splitFunc))
 	js.Global().Set("svg2gslideReady", js.ValueOf(true))
 	if cb := js.Global().Get("onSvg2gslideReady"); cb.Type() == js.TypeFunction {
 		cb.Invoke()
