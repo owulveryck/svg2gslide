@@ -148,4 +148,8 @@ type Orphan struct {
 	Source     string `json:"source,omitempty"`
 	Deleted    bool   `json:"deleted"`
 	Note       string `json:"note,omitempty"`
+	// Comments are the threads anchored in this slide. An orphan is left
+	// untouched, so they are not a conflict — but a comment the report stayed
+	// silent about is one nobody reads, and -prune would destroy it.
+	Comments []Comment `json:"comments,omitempty"`
 }

@@ -104,6 +104,11 @@ func Build(in Input) *Report {
 	}
 
 	for _, o := range in.Plan.Orphans {
+		// An orphan has no state record, so there are no origins to resolve
+		// its anchors against: the comments are reported against their object
+		// IDs rather than source nodes, which is still better than dropping
+		// them.
+		threads := comments(in.Comments, o.SlideID, nil)
 		r.Orphans = append(r.Orphans, Orphan{
 			Kind:       o.Kind,
 			SlideID:    o.SlideID,
@@ -111,7 +116,8 @@ func Build(in Input) *Report {
 			Title:      o.Title,
 			Source:     o.Source,
 			Deleted:    o.Delete,
-			Note:       orphanNote(o),
+			Note:       orphanNote(o, len(threads)),
+			Comments:   threads,
 		})
 	}
 	r.Summary.Orphans = len(r.Orphans)
@@ -273,12 +279,16 @@ func remediation(sp syncer.SlidePlan) string {
 	return ""
 }
 
-func orphanNote(o syncer.Orphan) string {
+func orphanNote(o syncer.Orphan, comments int) string {
 	switch {
 	case o.Kind == syncer.OrphanVanished:
 		return "The last sync recorded this slide but it is neither declared nor present; its record will be cleared."
+	case o.Delete && comments > 0:
+		return fmt.Sprintf("Deleted: no longer declared, and -prune was given. Its %d comment thread(s), listed here, went with it.", comments)
 	case o.Delete:
 		return "Deleted: no longer declared, and -prune was given."
+	case comments > 0:
+		return fmt.Sprintf("Not declared by the deck; left untouched, and it carries %d comment thread(s) that -prune would destroy. If this slide is one svg2gslide appended, declare its source in the deck so a sync keeps it in step.", comments)
 	default:
 		return "Not declared by the deck; left untouched. Use -prune to delete the slides svg2gslide created."
 	}

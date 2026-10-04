@@ -136,7 +136,7 @@ func runSync(ctx context.Context, f syncFlags) error {
 		return err
 	}
 
-	presentationID, err := resolvePresentation(ctx, client, f, st, entries)
+	presentationID, defaultSlides, err := resolvePresentation(ctx, client, f, st, entries)
 	if err != nil {
 		return err
 	}
@@ -150,6 +150,12 @@ func runSync(ctx context.Context, f syncFlags) error {
 		return err
 	}
 	comments := readComments(ctx, client, presentationID, live, withComments)
+
+	// The blank slide a brand-new presentation comes with belongs to nobody's
+	// deck. Hiding it from the reconciliation keeps it out of the report as a
+	// spurious orphan, and keeps every slide position counted from zero; the
+	// first push deletes it.
+	live.Slides = withoutSlides(live.Slides, defaultSlides)
 
 	plan := syncer.Reconcile(entries, st, live, comments.OpenCounts(), opt)
 
@@ -190,7 +196,7 @@ func runSync(ctx context.Context, f syncFlags) error {
 		fmt.Fprintln(os.Stderr, "backup:", url)
 	}
 
-	if err := apply(ctx, client, presentationID, live.RevisionId, plan, conversions); err != nil {
+	if err := apply(ctx, client, presentationID, live.RevisionId, plan, conversions, defaultSlides); err != nil {
 		return err
 	}
 
@@ -244,26 +250,29 @@ func parseForce(s string) map[string]bool {
 	return out
 }
 
-func resolvePresentation(ctx context.Context, client *gslide.Client, f syncFlags, st *state.State, entries []deck.Entry) (string, error) {
+// resolvePresentation names the target presentation, creating it on request.
+// defaultSlides holds the slides a freshly created presentation came with: not
+// part of the deck, and removed with the first push.
+func resolvePresentation(ctx context.Context, client *gslide.Client, f syncFlags, st *state.State, entries []deck.Entry) (id string, defaultSlides []string, err error) {
 	if f.presentation == "new" {
 		if st.PresentationID != "" {
-			return "", fmt.Errorf(`-presentation new, but the state already tracks %s; drop the state file or name the presentation`, st.PresentationID)
+			return "", nil, fmt.Errorf(`-presentation new, but the state already tracks %s; drop the state file or name the presentation`, st.PresentationID)
 		}
 		title := "svg2gslide"
 		if len(entries) > 0 {
 			title = strings.TrimSuffix(filepath.Base(entries[0].Source), filepath.Ext(entries[0].Source))
 		}
-		id, err := client.CreatePresentation(ctx, title)
+		id, defaultSlides, err = client.CreatePresentation(ctx, title)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		fmt.Printf("presentation created: https://docs.google.com/presentation/d/%s/edit\n", id)
-		return id, nil
+		return id, defaultSlides, nil
 	}
 	if id, err := convert.ExtractPresentationID(f.presentation); err == nil {
-		return id, nil
+		return id, nil, nil
 	}
-	return f.presentation, nil
+	return f.presentation, nil, nil
 }
 
 // readComments gets the comments the best way available, and never fails the
@@ -325,7 +334,7 @@ func backup(ctx context.Context, client *gslide.Client, presentationID string, l
 // A replace empties its slide and refills it, so a failure between the two
 // leaves that slide blank. Re-running the sync fixes it, and -backup is the
 // belt for the cases where that is not good enough.
-func apply(ctx context.Context, client *gslide.Client, presentationID, revisionID string, plan *syncer.Plan, conversions map[string]*convert.Result) error {
+func apply(ctx context.Context, client *gslide.Client, presentationID, revisionID string, plan *syncer.Plan, conversions map[string]*convert.Result, defaultSlides []string) error {
 	var destructive []*slides.Request
 	for _, sp := range plan.Slides {
 		for _, id := range sp.ClearElements {
@@ -350,6 +359,11 @@ func apply(ctx context.Context, client *gslide.Client, presentationID, revisionI
 			// again would collide with its own object ID.
 			reqs = withoutCreateSlide(reqs)
 		}
+		if len(defaultSlides) > 0 {
+			// Same call as the first real slide, so the deck is never empty.
+			reqs = append(gslide.DeleteRequests(defaultSlides), reqs...)
+			defaultSlides = nil
+		}
 		if err := pushSlide(ctx, client, presentationID, res, reqs); err != nil {
 			return fmt.Errorf("%s: %w", sp.Entry.Label, err)
 		}
@@ -367,6 +381,21 @@ func apply(ctx context.Context, client *gslide.Client, presentationID, revisionI
 		return fmt.Errorf("putting the deck in declared order: %w", err)
 	}
 	return nil
+}
+
+// withoutSlides drops the named pages from a slide list, keeping the order of
+// the rest.
+func withoutSlides(pages []*slides.Page, drop []string) []*slides.Page {
+	if len(drop) == 0 {
+		return pages
+	}
+	out := make([]*slides.Page, 0, len(pages))
+	for _, p := range pages {
+		if !slices.Contains(drop, p.ObjectId) {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // withoutCreateSlide drops the CreateSlide request convert prepends.

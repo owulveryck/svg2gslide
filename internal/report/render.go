@@ -53,6 +53,12 @@ func (r *Report) WriteText(w io.Writer) error {
 			label = o.SlideID
 		}
 		fmt.Fprintf(&b, "%s  %-24s %s\n", position(o.SlideIndex), label, orphanHeadline(o))
+		for _, c := range o.Comments {
+			writeComment(&b, c)
+		}
+		if o.Note != "" && len(o.Comments) > 0 {
+			fmt.Fprintf(&b, "    -> %s\n", o.Note)
+		}
 	}
 
 	if len(r.UnattributedComments) > 0 {
@@ -209,6 +215,8 @@ func orphanHeadline(o Orphan) string {
 		return "stale record (slide gone); will be cleared from the state"
 	case o.Deleted:
 		return "orphan, deleted"
+	case len(o.Comments) > 0:
+		return fmt.Sprintf("orphan, left untouched (%d comment thread(s))", len(o.Comments))
 	default:
 		return "orphan, left untouched"
 	}

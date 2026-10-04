@@ -6,7 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/api/slides/v1"
+
 	"github.com/owulveryck/svg2gslide/internal/deck"
+	"github.com/owulveryck/svg2gslide/internal/state"
+	"github.com/owulveryck/svg2gslide/internal/syncer"
 )
 
 const fixtureSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10"/></svg>`
@@ -164,6 +168,73 @@ func TestSyncDryRunNeedsNoNetwork(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, ".svg2gslide.json")); err == nil {
 		t.Error("a dry run wrote the state file")
 	}
+}
+
+// TestDefaultSlideIsNotPartOfTheDeck locks in what a fresh presentation must
+// look like: one source means one slide. The blank slide the API adds on its
+// own is hidden from the reconciliation, so it is neither reported as an
+// orphan nor counted in the slide positions — the first push deletes it.
+func TestDefaultSlideIsNotPartOfTheDeck(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.svg")
+	if err := os.WriteFile(path, []byte(fixtureSVG), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries, _, err := resolveDeck(syncFlags{sources: []string{path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defaultSlides := []string{"p"}
+	live := &slides.Presentation{
+		PresentationId: "1AbC",
+		Slides:         []*slides.Page{{ObjectId: "p"}},
+	}
+	live.Slides = withoutSlides(live.Slides, defaultSlides)
+
+	plan := syncer.Reconcile(entries, &state.State{}, live, nil, syncer.Options{})
+	if len(plan.Orphans) != 0 {
+		t.Errorf("orphans = %+v, want none: the blank slide is not a slide anyone added", plan.Orphans)
+	}
+	if len(plan.Slides) != 1 || plan.Slides[0].Action != syncer.ActionCreate {
+		t.Fatalf("slides = %+v, want one create", plan.Slides)
+	}
+	if got := plan.Slides[0].TargetIndex; got != 0 {
+		t.Errorf("target index = %d, want 0: the deck holds nothing else", got)
+	}
+	if len(plan.FinalOrder) != 1 {
+		t.Errorf("final order = %v, want just the created slide", plan.FinalOrder)
+	}
+	// The deletion rides along with the first push rather than the plan's own
+	// destructive call, so the presentation is never left with no slide.
+	if len(plan.Deletions) != 0 {
+		t.Errorf("deletions = %v, want the blank slide dropped by the push instead", plan.Deletions)
+	}
+}
+
+func TestWithoutSlides(t *testing.T) {
+	pages := []*slides.Page{{ObjectId: "p"}, {ObjectId: "a"}, {ObjectId: "b"}}
+
+	t.Run("nothing to drop keeps the list", func(t *testing.T) {
+		if got := withoutSlides(pages, nil); len(got) != 3 {
+			t.Errorf("got %d pages, want all 3", len(got))
+		}
+	})
+
+	t.Run("order of the rest is kept", func(t *testing.T) {
+		got := withoutSlides(pages, []string{"a"})
+		if len(got) != 2 || got[0].ObjectId != "p" || got[1].ObjectId != "b" {
+			t.Errorf("got %v, want p then b", ids(got))
+		}
+	})
+}
+
+func ids(pages []*slides.Page) []string {
+	var out []string
+	for _, p := range pages {
+		out = append(out, p.ObjectId)
+	}
+	return out
 }
 
 func sources(entries []deck.Entry) []string {

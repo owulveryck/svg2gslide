@@ -93,12 +93,15 @@ func run(ctx context.Context, svgPath, slideSel, presentationID, credentials, ph
 		return err
 	}
 
+	// Slides the API created on its own, dropped in the same call that pushes
+	// the first real slide.
+	var defaultSlides []string
 	if presentationID == "new" {
 		title := strings.TrimSuffix(filepath.Base(svgPath), filepath.Ext(svgPath))
 		if svgPath == "" {
 			title = "svg2gslide"
 		}
-		presentationID, err = client.CreatePresentation(ctx, title)
+		presentationID, defaultSlides, err = client.CreatePresentation(ctx, title)
 		if err != nil {
 			return err
 		}
@@ -107,7 +110,7 @@ func run(ctx context.Context, svgPath, slideSel, presentationID, credentials, ph
 		presentationID = id
 	}
 
-	pageW, pageH, err := client.PageSize(ctx, presentationID)
+	pageW, pageH, taken, err := client.Outline(ctx, presentationID)
 	if err != nil {
 		return err
 	}
@@ -118,6 +121,7 @@ func run(ctx context.Context, svgPath, slideSel, presentationID, credentials, ph
 			Label:   src.Label,
 			PageW:   pageW,
 			PageH:   pageH,
+			SlideID: appendSlideID(src, taken),
 			Phase:   phase,
 			Verbose: verbose,
 
@@ -136,6 +140,12 @@ func run(ctx context.Context, svgPath, slideSel, presentationID, credentials, ph
 			for _, w := range res.Warnings {
 				fmt.Fprintln(os.Stderr, "  [approx]", w)
 			}
+		}
+		if len(defaultSlides) > 0 {
+			// Same call as the first real slide: the deck goes straight from
+			// the API's blank slide to ours, with no empty state in between.
+			res.Requests = append(gslide.DeleteRequests(defaultSlides), res.Requests...)
+			defaultSlides = nil
 		}
 		if err := appendSlide(ctx, client, presentationID, res); err != nil {
 			return fmt.Errorf("%s: %w", src.Label, err)
@@ -193,11 +203,28 @@ func appendSlide(ctx context.Context, client *gslide.Client, presentationID stri
 
 // loadSources reads the input (file or stdin): a bare SVG gives one source,
 // an HTML page one source per selected inline SVG.
-//
-// The append path deliberately passes no identity to the converter, so every
-// slide gets a fresh random ID. Only sync needs slides it can find again.
 func loadSources(path, slideSel string) ([]deck.Entry, error) {
 	return deck.Resolve([]string{path}, []string{path}, deck.Options{Selection: slideSel})
+}
+
+// appendSlideID gives an appended slide the same deterministic object ID that
+// sync derives from the source, so a later sync recognizes the slide instead
+// of creating a second one beside it and reporting this one as an orphan.
+// taken is the set of IDs already in the presentation, updated as IDs are
+// handed out.
+//
+// It returns "" — letting the converter mint a random ID — in the two cases
+// where the derived ID would be wrong rather than useful: stdin, whose key
+// identifies no file a sync could ever find again (sync refuses stdin for that
+// reason), and an ID the presentation already holds, which is what appending
+// the same source twice does. A one-shot append must not fail on that
+// collision; the duplicate slide is one sync will report as an orphan.
+func appendSlideID(e deck.Entry, taken map[string]bool) string {
+	if e.Source == "" || taken[e.SlideID] {
+		return ""
+	}
+	taken[e.SlideID] = true
+	return e.SlideID
 }
 
 // dry converts each SVG against a default 16:9 page and prints what would

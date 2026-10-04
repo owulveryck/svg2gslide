@@ -295,6 +295,58 @@ func TestOrphanNotes(t *testing.T) {
 	}
 }
 
+// TestOrphanCommentsAreReported covers the case a slide appended by the
+// one-shot path used to produce: the deck does not declare the slide, so it is
+// an orphan — but a comment on it must still reach the reader, since -prune
+// would destroy it and the report is the only place it surfaces.
+func TestOrphanCommentsAreReported(t *testing.T) {
+	src := deck.Entry{Source: "a.svg", Data: []byte("<svg/>"), Key: "a.svg", SlideID: "svg2gslide_aaa"}
+	orphan := &slides.Page{
+		ObjectId:     "svg2gslide_0e1c0e9b",
+		PageElements: []*slides.PageElement{textBox("svg2gslide_0e1c0e9b_t", "enriches the solution")},
+		CommentAnchors: []*slides.CommentAnchor{{
+			AnchorId:      "anchor1",
+			ObjectAnchors: []*slides.ObjectAnchor{{ObjectId: "svg2gslide_0e1c0e9b_t"}},
+		}},
+	}
+	pres := &slides.Presentation{
+		PresentationId: "1AbC",
+		Slides:         []*slides.Page{orphan},
+		Comments: []*slides.CommentThread{{
+			CommentId: "AAABc", AnchorId: "anchor1", Status: "OPEN",
+			HeadPost: &slides.Post{
+				Author:  &slides.PostAuthor{DisplayName: "the author"},
+				Content: "cette phase mérite un exemple",
+			},
+		}},
+	}
+
+	comments := syncer.FromPresentation(pres)
+	plan := syncer.Reconcile([]deck.Entry{src}, &state.State{}, pres, comments.OpenCounts(), syncer.Options{})
+	r := Build(Input{Plan: plan, Live: pres, Comments: comments, Now: fixedNow})
+
+	if len(r.Orphans) != 1 {
+		t.Fatalf("orphans = %+v, want the undeclared slide", r.Orphans)
+	}
+	if got := len(r.Orphans[0].Comments); got != 1 {
+		t.Fatalf("orphan comments = %d, want the thread anchored in it", got)
+	}
+	if !strings.Contains(r.Orphans[0].Note, "-prune would destroy") {
+		t.Errorf("note = %q, want it to say the comment is at risk", r.Orphans[0].Note)
+	}
+
+	var buf bytes.Buffer
+	if err := r.WriteText(&buf); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"1 comment thread(s)", "cette phase mérite un exemple", "the author"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("text report is missing %q\n--- got ---\n%s", want, out)
+		}
+	}
+}
+
 func TestPositionalIdentityWarningReachesTheReader(t *testing.T) {
 	// An HTML slide with no id is identified by its position. That is a
 	// warning the user would otherwise never see, since such a slide is

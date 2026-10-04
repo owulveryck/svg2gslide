@@ -11,6 +11,7 @@ import (
 	"os"
 
 	"google.golang.org/api/drive/v3"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 	"google.golang.org/api/slides/v1"
 
@@ -41,29 +42,66 @@ func NewClient(ctx context.Context, credentialsFile string) (*Client, error) {
 	return &Client{Slides: slidesSrv, Drive: driveSrv}, nil
 }
 
-// CreatePresentation creates an empty presentation and returns its ID.
-func (c *Client) CreatePresentation(ctx context.Context, title string) (string, error) {
+// CreatePresentation creates a presentation and returns its ID together with
+// the object IDs of the slides the API put in it unasked.
+//
+// A new presentation always comes with one blank slide, which is not part of
+// anybody's deck. Callers delete it in the same batchUpdate that creates their
+// first real slide: that way the deck never keeps a slide nobody asked for,
+// and never momentarily holds none — which is what deleting it in a call of
+// its own would do, on a presentation whose last page the API may well refuse
+// to remove.
+func (c *Client) CreatePresentation(ctx context.Context, title string) (id string, defaultSlides []string, err error) {
 	pres, err := retry.DoWithResult(ctx, "presentations.create", func() (*slides.Presentation, error) {
 		return c.Slides.Presentations.Create(&slides.Presentation{Title: title}).Context(ctx).Do()
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to create presentation: %w", err)
+		return "", nil, fmt.Errorf("failed to create presentation: %w", err)
 	}
-	return pres.PresentationId, nil
+	for _, s := range pres.Slides {
+		defaultSlides = append(defaultSlides, s.ObjectId)
+	}
+	return pres.PresentationId, defaultSlides, nil
+}
+
+// DeleteRequests builds the requests that remove these objects.
+func DeleteRequests(ids []string) []*slides.Request {
+	out := make([]*slides.Request, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, &slides.Request{DeleteObject: &slides.DeleteObjectRequest{ObjectId: id}})
+	}
+	return out
 }
 
 // PageSize returns the presentation page size in EMU.
 func (c *Client) PageSize(ctx context.Context, presentationID string) (w, h float64, err error) {
+	w, h, _, err = c.outline(ctx, presentationID, "pageSize")
+	return w, h, err
+}
+
+// Outline returns the page size in EMU together with the object IDs of the
+// slides the presentation already holds, in one call. The append path needs
+// both: the size to fit the drawing, and the IDs to know whether the slide ID
+// it derives from the source is still free.
+func (c *Client) Outline(ctx context.Context, presentationID string) (w, h float64, slideIDs map[string]bool, err error) {
+	return c.outline(ctx, presentationID, "pageSize,slides.objectId")
+}
+
+func (c *Client) outline(ctx context.Context, presentationID, fields string) (w, h float64, slideIDs map[string]bool, err error) {
 	pres, err := retry.DoWithResult(ctx, "presentations.get", func() (*slides.Presentation, error) {
-		return c.Slides.Presentations.Get(presentationID).Fields("pageSize").Context(ctx).Do()
+		return c.Slides.Presentations.Get(presentationID).Fields(googleapi.Field(fields)).Context(ctx).Do()
 	})
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get presentation %s: %w", presentationID, err)
+		return 0, 0, nil, fmt.Errorf("failed to get presentation %s: %w", presentationID, err)
 	}
 	if pres.PageSize == nil || pres.PageSize.Width == nil || pres.PageSize.Height == nil {
-		return 0, 0, fmt.Errorf("presentation %s has no page size", presentationID)
+		return 0, 0, nil, fmt.Errorf("presentation %s has no page size", presentationID)
 	}
-	return pres.PageSize.Width.Magnitude, pres.PageSize.Height.Magnitude, nil
+	slideIDs = make(map[string]bool, len(pres.Slides))
+	for _, s := range pres.Slides {
+		slideIDs[s.ObjectId] = true
+	}
+	return pres.PageSize.Width.Magnitude, pres.PageSize.Height.Magnitude, slideIDs, nil
 }
 
 // batchLimit is the most requests one batchUpdate call carries. Beyond it the

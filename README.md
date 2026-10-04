@@ -109,7 +109,7 @@ Flags:
 |---|---|
 | `-svg` | input SVG file, or HTML page with inline SVGs (default: stdin) |
 | `-slides` | HTML input only: SVGs to convert, 1-based (`1-3,7,10-`; default: all) |
-| `-presentation` | target presentation ID or URL (required); `new` creates a presentation named after the SVG and prints its URL |
+| `-presentation` | target presentation ID or URL (required); `new` creates a presentation named after the SVG and prints its URL. The blank slide a new presentation comes with is removed in the same call that pushes the first real one, so one SVG gives exactly one slide |
 | `-credentials` | OAuth client or service account JSON (default: `$SVG2GSLIDE_CREDENTIALS`, then `~/.config/svg2gslide/client.json`) |
 | `-phase` | force the active phase (default: the SVG's `data-active-phase` attribute) |
 | `-out-thumbnail` | download the new slide's PNG thumbnail to this path (`name-NN.png` per slide for an HTML input) |
@@ -195,7 +195,9 @@ or `-force <source>` (or `-force all`) to let the source win.
 
 **Nothing is ever deleted without `-prune`**, and even then only slides
 svg2gslide created: a slide added by hand is reported as an orphan and left
-alone. `-backup` takes a Drive copy first — there is no named-version API
+alone. An orphan's comment threads are listed in the report too — `-prune`
+would destroy them, and the report is the only place they surface.
+`-backup` takes a Drive copy first — there is no named-version API
 (a Drive revision carries no name, and `keepForever` is documented as applying
 only to files with binary content, so it is inert on a Slides file), so a copy
 is the only snapshot available.
@@ -210,6 +212,17 @@ For an HTML deck, a slide is identified by the `id` of its `<svg>` (or of its
 `<section>`). Without one it falls back to the inline SVG's position, and sync
 says so — such a slide loses its identity if you reorder the HTML. Giving your
 `<svg>` elements ids is worth the trouble.
+
+Both forms derive the ID the same way, so the two mix: a slide appended with
+`svg2gslide -svg flow.svg` is the slide a later `sync … flow.svg` recognizes.
+Sync has no record of what the append pushed, though, so it cannot tell that
+slide's contents from a human's edits: it reports an `ADOPTION` and leaves it
+alone until you confirm with `-force flow.svg`. Appending the same source twice
+is still two slides — the second gets a random ID, and sync reports it as an
+orphan.
+
+Only stdin has no identity to derive: `svg2gslide < flow.svg` gets a random ID,
+and sync refuses stdin outright rather than create a duplicate on every run.
 
 ### Comments
 

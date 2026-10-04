@@ -21,10 +21,10 @@ type Input struct {
 	SVG          io.Reader // SVG document
 	Label        string    // used in error messages ("<stdin>", filename, "upload")
 	PageW, PageH float64   // presentation page size in EMU
-	// SlideID is the object ID to give the created slide. Leave it empty to
-	// get a random one, which is what a one-shot append wants; sync passes
-	// the deterministic ID derived from the source so the slide can be found
-	// again on a later run.
+	// SlideID is the object ID to give the created slide. Both CLI paths pass
+	// the deterministic ID derived from the source, so a slide can be found
+	// again on a later run. Leave it empty to get a random one, which is what
+	// a source with no identity to derive from (stdin, an upload) needs.
 	SlideID string
 	Phase   string // "" → use the SVG's data-active-phase attribute
 	Verbose bool   // passed to mapper.Config
@@ -38,7 +38,7 @@ type Input struct {
 
 // Result is the outcome of a conversion, ready for a batchUpdate call.
 type Result struct {
-	SlideID  string            // "svg2gslide_" + random suffix
+	SlideID  string            // "svg2gslide_" + the caller's suffix, or a random one
 	Phase    string            // effective phase actually used
 	Requests []*slides.Request // CreateSlide prepended; len ≥ 1
 	Warnings []string
