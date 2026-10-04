@@ -174,6 +174,47 @@ func TestSyncDryRunNeedsNoNetwork(t *testing.T) {
 	}
 }
 
+// TestHintTarget locks in that a hint carries -presentation exactly when the
+// command would not work without it.
+func TestHintTarget(t *testing.T) {
+	const idA = "1QcAfAtrbqEJZbLkFwD4QoPdtRQdMz7DmUnmEZBIr9_c"
+	const idB = "1FCml6BnI5WlOKbuMjS-PtpN5dHItaNFViMxwPsxX4Fc"
+
+	tracking := func(t *testing.T, ids ...string) string {
+		t.Helper()
+		dir := t.TempDir()
+		for _, id := range ids {
+			if err := (&state.State{PresentationID: id}).Save(state.DefaultPath(dir, id)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+
+	t.Run("the state names it, so the hint need not", func(t *testing.T) {
+		if got := hintTarget(tracking(t, idA), idA); got != "" {
+			t.Errorf("hintTarget() = %q, want none", got)
+		}
+	})
+	t.Run("several decks tracked there", func(t *testing.T) {
+		if got := hintTarget(tracking(t, idA, idB), idA); got != idA {
+			t.Errorf("hintTarget() = %q, want %q: discovery would be ambiguous", got, idA)
+		}
+	})
+	t.Run("no state written at all", func(t *testing.T) {
+		// A baseline that could not be written leaves nothing to discover, so
+		// a hint without the ID would not run.
+		if got := hintTarget(t.TempDir(), idA); got != idA {
+			t.Errorf("hintTarget() = %q, want %q", got, idA)
+		}
+	})
+	t.Run("the state beside the deck is another presentation's", func(t *testing.T) {
+		if got := hintTarget(tracking(t, idB), idA); got != idA {
+			t.Errorf("hintTarget() = %q, want %q", got, idA)
+		}
+	})
+}
+
 // TestProgramName locks in that a hint names something runnable: under
 // "go run" the executable is a temporary build in the toolchain's cache, and
 // printing its name gives a line that only looks like a command.

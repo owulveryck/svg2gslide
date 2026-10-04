@@ -171,6 +171,17 @@ pick one when the directory tracks several — in which case sync says so and
 lists them. A state file written by an older version (the bare
 `.svg2gslide.json`) is read once and rewritten under the new name.
 
+Appending records the same baseline for the slides it pushed, so you can start
+one-shot and switch to sync without being asked to adopt your own work. Both
+forms print the sync command to run next:
+
+```sh
+go run . -presentation new -svg flow.svg
+# presentation created: https://docs.google.com/presentation/d/1zSJqJ.../edit
+# flow.svg: slide svg2gslide_3ce50fb177 created (235 requests, phase "8")
+# to sync it from now on: go run . sync flow.svg
+```
+
 ### Nothing human is overwritten by accident
 
 A presentation is a shared document. Before writing, sync compares each slide

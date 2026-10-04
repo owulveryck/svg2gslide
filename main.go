@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"google.golang.org/api/slides/v1"
 
@@ -20,6 +21,8 @@ import (
 	"github.com/owulveryck/svg2gslide/internal/deck"
 	"github.com/owulveryck/svg2gslide/internal/gslide"
 	"github.com/owulveryck/svg2gslide/internal/mapper"
+	"github.com/owulveryck/svg2gslide/internal/state"
+	"github.com/owulveryck/svg2gslide/internal/syncer"
 )
 
 func main() {
@@ -111,6 +114,10 @@ func run(ctx context.Context, svgPath, slideSel, presentationID, credentials, ph
 		presentationID = id
 	}
 
+	// What was pushed, to be recorded as the baseline a later sync compares
+	// against.
+	var pushed []appended
+
 	pageW, pageH, taken, err := client.Outline(ctx, presentationID)
 	if err != nil {
 		return err
@@ -151,6 +158,13 @@ func run(ctx context.Context, svgPath, slideSel, presentationID, credentials, ph
 		if err := appendSlide(ctx, client, presentationID, res); err != nil {
 			return fmt.Errorf("%s: %w", src.Label, err)
 		}
+		if src.Source != "" && res.SlideID == src.SlideID {
+			// Only a slide carrying the ID derived from its source can be
+			// found again by a sync. Appending the same source twice falls
+			// back to a random one (see appendSlideID): that duplicate is an
+			// orphan for sync to report, not a baseline to record.
+			pushed = append(pushed, appended{entry: src, res: res})
+		}
 		fmt.Printf("%s: slide %s created (%d requests, phase %q)\n", src.Label, res.SlideID, len(res.Requests), res.Phase)
 		fmt.Printf("https://docs.google.com/presentation/d/%s/edit#slide=id.%s\n", presentationID, res.SlideID)
 
@@ -166,19 +180,95 @@ func run(ctx context.Context, svgPath, slideSel, presentationID, credentials, ph
 			fmt.Println("thumbnail:", path)
 		}
 	}
+	deckDir := filepath.Dir(svgPath)
+	var statePath string
+	var fresh bool
+	if len(pushed) > 0 {
+		statePath, fresh, err = recordAppends(ctx, client, presentationID, deckDir, pushed)
+		if err != nil {
+			// The slides are in. A baseline that could not be written must not
+			// fail the append; it only costs the next sync an adoption.
+			fmt.Fprintln(os.Stderr, "warning: the baseline for a later sync could not be written:", err)
+		}
+	}
+
 	if exportPDF != "" {
 		if err := client.ExportPDF(ctx, presentationID, exportPDF); err != nil {
 			return err
 		}
 		fmt.Println("pdf:", exportPDF)
 	}
+
 	// Appending is the one-shot form, so the next run is the interesting one:
 	// say how to iterate on this input instead of leaving the ID to be read
 	// out of the URL by hand. Not for stdin, which sync cannot identify.
-	if created && svgPath != "" {
-		fmt.Printf("to sync it from now on: %s\n", syncHint(presentationID, "", slideSel, []string{svgPath}))
+	switch {
+	case created && svgPath != "":
+		fmt.Printf("to sync it from now on: %s\n", syncHint(hintTarget(deckDir, presentationID), "", slideSel, []string{svgPath}))
+	case fresh:
+		// A file appeared beside the sources; say so rather than leave it to
+		// be discovered.
+		fmt.Println("baseline for a later sync:", statePath)
 	}
 	return nil
+}
+
+// appended pairs a source with the conversion that was pushed for it.
+type appended struct {
+	entry deck.Entry
+	res   *convert.Result
+}
+
+// recordAppends writes the baseline for the slides just appended, so a later
+// sync recognizes its own work instead of asking to adopt it. Appending
+// already derives the slide ID sync looks for; this is what tells sync what
+// was in it.
+//
+// It reports where the state went, and whether that file is new. One read
+// covers every slide: a fingerprint has to be the server's view of the slide,
+// compared like with like against future reads.
+func recordAppends(ctx context.Context, client *gslide.Client, presentationID, deckDir string, pushed []appended) (statePath string, fresh bool, err error) {
+	after, err := client.GetPresentation(ctx, presentationID)
+	if err != nil {
+		return "", false, err
+	}
+	pages := map[string]*slides.Page{}
+	for _, p := range after.Slides {
+		pages[p.ObjectId] = p
+	}
+
+	st, statePath, err := state.LoadFor(deckDir, presentationID)
+	if err != nil {
+		return "", false, err
+	}
+	// Appending to a deck sync already tracks adds to its record rather than
+	// replacing it: the slides this run did not touch are still synced.
+	fresh = st.PresentationID == ""
+	st.PresentationID = presentationID
+	st.SyncedAt = time.Now().UTC()
+	st.RevisionID = after.RevisionId
+
+	for _, a := range pushed {
+		page := pages[a.entry.SlideID]
+		if page == nil {
+			// Not in the deck we just read: recording a fingerprint for it
+			// would be a lie.
+			continue
+		}
+		st.Put(state.Entry{
+			Source:     a.entry.Source,
+			Key:        a.entry.Key,
+			SlideID:    a.entry.SlideID,
+			SVGID:      a.entry.SVGID,
+			HTMLIndex:  a.entry.HTMLIndex,
+			SourceHash: state.SourceHash(a.entry.Data),
+			// Appending has no -geometry flag, and an absent geometry
+			// compares cleanly against a geometric read later.
+			Pushed:  syncer.Fingerprint(page, false),
+			Origins: originsOf(a.res),
+		})
+	}
+	return statePath, fresh, st.Save(statePath)
 }
 
 // appendSlide sends the conversion result to the presentation.

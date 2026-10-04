@@ -241,13 +241,8 @@ func runSync(ctx context.Context, f syncFlags) error {
 	}
 	if target == "new" {
 		// The URL printed above is not something to paste back in: the state
-		// file just written names the presentation from now on. It only has to
-		// be named again if this directory tracks more than this one deck.
-		named := ""
-		if ids, err := state.Discover(deckDir); err != nil || len(ids) > 1 {
-			named = presentationID
-		}
-		fmt.Printf("next sync: %s\n", syncHint(named, f.deckFile, f.slideSel, f.sources))
+		// file just written names the presentation from now on.
+		fmt.Printf("next sync: %s\n", syncHint(hintTarget(deckDir, presentationID), f.deckFile, f.slideSel, f.sources))
 	}
 	return nil
 }
@@ -365,6 +360,17 @@ func syncHint(presentationID, deckFile, slideSel string, sources []string) strin
 		args[i] = shellArg(a)
 	}
 	return invocation() + " " + strings.Join(args, " ")
+}
+
+// hintTarget says which presentation a hint still has to name: none, when the
+// state file beside the deck records this one and nothing else. Anything less
+// certain — several decks tracked there, or no state written at all — and the
+// command only works if it carries the ID.
+func hintTarget(deckDir, presentationID string) string {
+	if ids, err := state.Discover(deckDir); err == nil && len(ids) == 1 && ids[0] == presentationID {
+		return ""
+	}
+	return presentationID
 }
 
 // invocation names this build the way the reader can run it again.
