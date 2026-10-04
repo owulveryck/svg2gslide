@@ -174,6 +174,62 @@ func TestSyncDryRunNeedsNoNetwork(t *testing.T) {
 	}
 }
 
+// TestSyncHint locks in that a freshly created presentation tells you how to
+// run the sync again, which is the alternative to reading its ID out of a URL
+// by hand.
+func TestSyncHint(t *testing.T) {
+	const id = "1QcAfAtrbqEJZbLkFwD4QoPdtRQdMz7DmUnmEZBIr9_c"
+	bin := filepath.Base(os.Args[0])
+
+	tests := []struct {
+		name         string
+		presentation string
+		deckFile     string
+		slideSel     string
+		sources      []string
+		want         string
+	}{
+		{
+			// The state file beside the deck names the presentation, so the
+			// hint does not have to.
+			name:    "the deck alone",
+			sources: []string{"slides/flow.svg"},
+			want:    bin + " sync slides/flow.svg",
+		},
+		{
+			name:         "a presentation to name",
+			presentation: id,
+			sources:      []string{"slides/flow.svg"},
+			want:         bin + " sync -presentation " + id + " slides/flow.svg",
+		},
+		{
+			name:     "a manifest is the deck",
+			deckFile: "deck.txt",
+			want:     bin + " sync -deck deck.txt",
+		},
+		{
+			// Which inline SVGs are taken is part of what the deck is.
+			name:     "an HTML selection is carried over",
+			slideSel: "1-3,7",
+			sources:  []string{"talk.html"},
+			want:     bin + " sync -slides 1-3,7 talk.html",
+		},
+		{
+			name:    "a path a shell would split is quoted",
+			sources: []string{"my slides/flow.svg"},
+			want:    bin + " sync 'my slides/flow.svg'",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := syncHint(tt.presentation, tt.deckFile, tt.slideSel, tt.sources)
+			if got != tt.want {
+				t.Errorf("syncHint() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestResolveTarget covers how the presentation is named, which is also how
 // the state file is found: the state is named after the presentation it
 // records.

@@ -96,6 +96,7 @@ func run(ctx context.Context, svgPath, slideSel, presentationID, credentials, ph
 	// Slides the API created on its own, dropped in the same call that pushes
 	// the first real slide.
 	var defaultSlides []string
+	created := presentationID == "new"
 	if presentationID == "new" {
 		title := strings.TrimSuffix(filepath.Base(svgPath), filepath.Ext(svgPath))
 		if svgPath == "" {
@@ -170,6 +171,12 @@ func run(ctx context.Context, svgPath, slideSel, presentationID, credentials, ph
 			return err
 		}
 		fmt.Println("pdf:", exportPDF)
+	}
+	// Appending is the one-shot form, so the next run is the interesting one:
+	// say how to iterate on this input instead of leaving the ID to be read
+	// out of the URL by hand. Not for stdin, which sync cannot identify.
+	if created && svgPath != "" {
+		fmt.Printf("to sync it from now on: %s\n", syncHint(presentationID, "", slideSel, []string{svgPath}))
 	}
 	return nil
 }

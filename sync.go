@@ -236,7 +236,20 @@ func runSync(ctx context.Context, f syncFlags) error {
 	}
 
 	in.Live = after
-	return emitReport(f, report.Build(in))
+	if err := emitReport(f, report.Build(in)); err != nil {
+		return err
+	}
+	if target == "new" {
+		// The URL printed above is not something to paste back in: the state
+		// file just written names the presentation from now on. It only has to
+		// be named again if this directory tracks more than this one deck.
+		named := ""
+		if ids, err := state.Discover(deckDir); err != nil || len(ids) > 1 {
+			named = presentationID
+		}
+		fmt.Printf("next sync: %s\n", syncHint(named, f.deckFile, f.slideSel, f.sources))
+	}
+	return nil
 }
 
 // resolveDeck turns the flags into the ordered deck, and says which directory
@@ -325,6 +338,40 @@ func deckDirName(dir string) string {
 		return "."
 	}
 	return dir
+}
+
+// syncHint renders the sync command that reconciles this deck again, printed
+// once a presentation has just been created: the alternative is reading its ID
+// out of the URL by hand on every subsequent run.
+//
+// presentationID is left empty when the state file beside the deck already
+// names the target, which is the usual case right after a sync created it.
+func syncHint(presentationID, deckFile, slideSel string, sources []string) string {
+	args := []string{filepath.Base(os.Args[0]), "sync"}
+	if presentationID != "" {
+		args = append(args, "-presentation", presentationID)
+	}
+	if deckFile != "" {
+		args = append(args, "-deck", deckFile)
+	}
+	if slideSel != "" {
+		// Which inline SVGs are taken is part of what the deck is.
+		args = append(args, "-slides", slideSel)
+	}
+	args = append(args, sources...)
+	for i, a := range args {
+		args[i] = shellArg(a)
+	}
+	return strings.Join(args, " ")
+}
+
+// shellArg quotes a path that a shell would not read as one word, so the hint
+// can be pasted as it stands.
+func shellArg(s string) string {
+	if s != "" && !strings.ContainsAny(s, " \t\n'\"\\$`*?[]()&|;<>#~!") {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // resolvePresentation names the target presentation, creating it on request.
