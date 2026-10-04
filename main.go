@@ -327,7 +327,7 @@ replacing only what changed and reporting what a human edited or commented on
 ("%[1]s sync -h" for its flags).
 
 Flags:
-`, filepath.Base(os.Args[0]))
+`, invocation())
 	flag.PrintDefaults()
 }
 

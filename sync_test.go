@@ -174,12 +174,55 @@ func TestSyncDryRunNeedsNoNetwork(t *testing.T) {
 	}
 }
 
+// TestProgramName locks in that a hint names something runnable: under
+// "go run" the executable is a temporary build in the toolchain's cache, and
+// printing its name gives a line that only looks like a command.
+func TestProgramName(t *testing.T) {
+	tests := []struct {
+		name, exe, arg0, want string
+	}{
+		{
+			name: "go run builds into the toolchain cache",
+			exe:  "/tmp/go-build1234/b001/exe/svg2gslide",
+			arg0: "/tmp/go-build1234/b001/exe/svg2gslide",
+			want: "go run .",
+		},
+		{
+			name: "so does go test",
+			exe:  "/tmp/go-build99/b001/svg2gslide.test",
+			arg0: "/tmp/go-build99/b001/svg2gslide.test",
+			want: "go run .",
+		},
+		{
+			name: "an installed binary is named as it was called",
+			exe:  "/home/u/go/bin/svg2gslide",
+			arg0: "svg2gslide",
+			want: "svg2gslide",
+		},
+		{
+			// A build sitting in the working directory is run as ./svg2gslide,
+			// which is how it was called.
+			name: "a local build keeps its spelling",
+			exe:  "/home/u/src/svg2gslide/svg2gslide",
+			arg0: "./svg2gslide",
+			want: "svg2gslide",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := programName(tt.exe, tt.arg0); got != tt.want {
+				t.Errorf("programName(%q, %q) = %q, want %q", tt.exe, tt.arg0, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestSyncHint locks in that a freshly created presentation tells you how to
 // run the sync again, which is the alternative to reading its ID out of a URL
 // by hand.
 func TestSyncHint(t *testing.T) {
 	const id = "1QcAfAtrbqEJZbLkFwD4QoPdtRQdMz7DmUnmEZBIr9_c"
-	bin := filepath.Base(os.Args[0])
+	bin := invocation()
 
 	tests := []struct {
 		name         string

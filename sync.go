@@ -60,7 +60,7 @@ The state file beside the deck is named after the presentation it records, so
 to name a new presentation, or to pick one when the directory tracks several.
 
 Flags:
-`, filepath.Base(os.Args[0]))
+`, invocation())
 		fs.PrintDefaults()
 	}
 }
@@ -347,7 +347,9 @@ func deckDirName(dir string) string {
 // presentationID is left empty when the state file beside the deck already
 // names the target, which is the usual case right after a sync created it.
 func syncHint(presentationID, deckFile, slideSel string, sources []string) string {
-	args := []string{filepath.Base(os.Args[0]), "sync"}
+	// The invocation is already a command ("go run ." carries a space of its
+	// own), so only the arguments after it are quoted as words.
+	args := []string{"sync"}
 	if presentationID != "" {
 		args = append(args, "-presentation", presentationID)
 	}
@@ -362,7 +364,28 @@ func syncHint(presentationID, deckFile, slideSel string, sources []string) strin
 	for i, a := range args {
 		args[i] = shellArg(a)
 	}
-	return strings.Join(args, " ")
+	return invocation() + " " + strings.Join(args, " ")
+}
+
+// invocation names this build the way the reader can run it again.
+func invocation() string {
+	exe, err := os.Executable()
+	if err != nil {
+		exe = os.Args[0]
+	}
+	return programName(exe, os.Args[0])
+}
+
+// programName is invocation's decision, split out to be testable.
+//
+// Under "go run" the executable is a temporary build in the toolchain's cache,
+// so its name is on nobody's PATH: printing it gives a line that cannot be
+// run. "go run ." is how such a reader got here and how they will get back.
+func programName(exe, arg0 string) string {
+	if strings.Contains(filepath.ToSlash(filepath.Dir(exe)), "/go-build") {
+		return "go run ."
+	}
+	return filepath.Base(arg0)
 }
 
 // shellArg quotes a path that a shell would not read as one word, so the hint
