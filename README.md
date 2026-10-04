@@ -254,13 +254,19 @@ and sync refuses stdin outright rather than create a duplicate on every run.
 ### Comments
 
 Reading comments anchored to a precise shape uses a Slides API feature that is
-in [Developer Preview](https://developers.google.com/workspace/preview). Without
-enrollment, sync falls back to the Drive comments API, whose anchor is opaque
-for editor files; comments are then tied to slides by matching their quoted
-text, and each one is marked `quoted-text-match` or `ambiguous`. The report
-always states which source was used, and says so explicitly when comments could
-not be read at all — silence would read as "no comments", which is a different
-claim.
+in [Developer Preview](https://developers.google.com/workspace/preview). Outside
+the preview the request is accepted and the comments are simply left out of the
+response, which is indistinguishable from a deck that has none — so whenever
+that response carries no thread, sync asks the Drive comments API as well,
+rather than take the silence for an answer.
+
+Drive's anchor is opaque for editor files, so comments are then tied to slides
+by matching their quoted text: the whole label when the commenter selected it
+whole, otherwise the one element containing the quoted fragment. Each is marked
+`quoted-text-match`, or `ambiguous` when several slides hold the same words. The
+report states which source was used whenever a comment came through it, and says
+explicitly when comments could not be read at all — silence would read as "no
+comments", which is a different claim.
 
 ### What a failure leaves behind
 

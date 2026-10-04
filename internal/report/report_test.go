@@ -274,6 +274,38 @@ func TestUnavailableCommentsAreStated(t *testing.T) {
 	}
 }
 
+func TestDriveCaveatIsSaidOnlyWhenThereIsACommentToQualify(t *testing.T) {
+	src := deck.Entry{Source: "a.svg", Data: []byte("<svg/>"), Key: "a.svg", SlideID: "svg2gslide_aaa"}
+	page := &slides.Page{ObjectId: src.SlideID, PageElements: []*slides.PageElement{textBox("t", "Validation")}}
+	pres := &slides.Presentation{PresentationId: "1AbC", Slides: []*slides.Page{page}}
+	plan := syncer.Reconcile([]deck.Entry{src}, &state.State{}, pres, nil, syncer.Options{})
+
+	const caveat = "read through Drive"
+
+	t.Run("a deck with no comments says nothing about anchors", func(t *testing.T) {
+		// Every sync of such a deck reaches Drive, so the caveat would
+		// otherwise be a standing line about nothing.
+		var buf bytes.Buffer
+		r := Build(Input{Plan: plan, Live: pres, Now: fixedNow, Comments: &syncer.Comments{Source: syncer.SourceDrive}})
+		_ = r.WriteText(&buf)
+		if strings.Contains(buf.String(), caveat) {
+			t.Errorf("text = %q, want no caveat when there is no comment", buf.String())
+		}
+	})
+
+	t.Run("an attributed comment carries the caveat", func(t *testing.T) {
+		var buf bytes.Buffer
+		comments := &syncer.Comments{Source: syncer.SourceDrive, Items: []syncer.Comment{{
+			ID: "c1", Open: true, SlideID: src.SlideID, Confidence: syncer.ConfidenceQuoted,
+		}}}
+		r := Build(Input{Plan: plan, Live: pres, Now: fixedNow, Comments: comments})
+		_ = r.WriteText(&buf)
+		if !strings.Contains(buf.String(), caveat) {
+			t.Errorf("text = %q, want the attribution qualified", buf.String())
+		}
+	})
+}
+
 func TestOrphanNotes(t *testing.T) {
 	src := deck.Entry{Source: "a.svg", Data: []byte("<svg/>"), Key: "a.svg", SlideID: "svg2gslide_aaa"}
 	ours := &slides.Page{ObjectId: src.SlideID}

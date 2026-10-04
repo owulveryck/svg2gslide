@@ -173,6 +173,48 @@ func TestFromDriveAttributesByQuotedText(t *testing.T) {
 	}
 }
 
+func TestFromDriveResolvesAQuotedFragment(t *testing.T) {
+	// Drive quotes the words the commenter selected, not the whole label, so a
+	// comment on one word of a text box must still find its element.
+	pres := presentation(
+		slide("s1", "👁 Capture the intent", "📋 Plan the steps"),
+		slide("s2", "Deploy"),
+	)
+	got := FromDrive([]*drive.Comment{driveComment("c1", "Capture", "note", false)}, pres)
+
+	c := got.Items[0]
+	if c.SlideID != "s1" || c.ObjectID != "s1_ea" {
+		t.Errorf("resolved to slide %q element %q, want s1/s1_ea", c.SlideID, c.ObjectID)
+	}
+	if c.Confidence != ConfidenceQuoted {
+		t.Errorf("confidence = %q, want %q", c.Confidence, ConfidenceQuoted)
+	}
+}
+
+func TestFromDrivePrefersAWholeElementOverAFragment(t *testing.T) {
+	// "Deploy" is a label of its own on s2 and a word of a sentence on s1:
+	// the element the commenter can have selected whole is the better guess.
+	pres := presentation(slide("s1", "Deploy the thing"), slide("s2", "Deploy"))
+	got := FromDrive([]*drive.Comment{driveComment("c1", "Deploy", "note", false)}, pres)
+
+	if c := got.Items[0]; c.SlideID != "s2" {
+		t.Errorf("resolved to %q, want the slide holding it as a whole label", c.SlideID)
+	}
+}
+
+func TestFromDriveReportsAnAmbiguousFragment(t *testing.T) {
+	pres := presentation(slide("s1", "Plan the steps"), slide("s2", "Plan the release"))
+	got := FromDrive([]*drive.Comment{driveComment("c1", "Plan", "note", false)}, pres)
+
+	c := got.Items[0]
+	if c.Confidence != ConfidenceAmbiguous || c.SlideID != "" {
+		t.Errorf("confidence = %q, slideID = %q, want an ambiguous fragment left unattributed", c.Confidence, c.SlideID)
+	}
+	if strings.Join(c.Candidates, ",") != "s1,s2" {
+		t.Errorf("candidates = %v, want both slides listed", c.Candidates)
+	}
+}
+
 func TestFromDriveReportsAmbiguityRatherThanGuessing(t *testing.T) {
 	// The same label on two slides: Drive's anchor is opaque, so there is no
 	// way to tell which one. Saying so beats picking one.

@@ -229,15 +229,14 @@ func authorOf(a *slides.PostAuthor) string {
 func FromDrive(items []*drive.Comment, pres *slides.Presentation) *Comments {
 	out := &Comments{Source: SourceDrive}
 
-	// Which slides hold a given piece of text, and on which element.
-	byText := map[string][]textHit{}
+	// Every piece of text the deck holds, in reading order, so a quote is
+	// matched against the elements deterministically.
+	var hits []textHit
 	for _, page := range pres.Slides {
 		for _, el := range Elements(page) {
-			t := TextOf(el)
-			if t == "" {
-				continue
+			if t := TextOf(el); t != "" {
+				hits = append(hits, textHit{page.ObjectId, el.ObjectId, t})
 			}
-			byText[t] = append(byText[t], textHit{page.ObjectId, el.ObjectId})
 		}
 	}
 
@@ -266,22 +265,18 @@ func FromDrive(items []*drive.Comment, pres *slides.Presentation) *Comments {
 		}
 
 		quote := strings.Join(strings.Fields(c.QuotedText), " ")
-		switch hits := uniqueSlides(byText[quote]); {
-		case quote == "" || len(hits) == 0:
+		matches := matchQuote(hits, quote)
+		switch slideIDs := uniqueSlides(matches); {
+		case len(slideIDs) == 0:
 			c.Confidence = ConfidenceUnresolved
-		case len(hits) == 1:
-			c.SlideID = hits[0]
+		case len(slideIDs) == 1:
+			c.SlideID = slideIDs[0]
+			c.ObjectID = matches[0].objectID
 			c.Confidence = ConfidenceQuoted
-			for _, h := range byText[quote] {
-				if h.slideID == hits[0] {
-					c.ObjectID = h.objectID
-					break
-				}
-			}
 		default:
 			// The same label on several slides: say so rather than guess.
 			c.Confidence = ConfidenceAmbiguous
-			c.Candidates = hits
+			c.Candidates = slideIDs
 		}
 		out.Items = append(out.Items, c)
 	}
@@ -289,7 +284,33 @@ func FromDrive(items []*drive.Comment, pres *slides.Presentation) *Comments {
 }
 
 // textHit records where a piece of text was found.
-type textHit struct{ slideID, objectID string }
+type textHit struct{ slideID, objectID, text string }
+
+// matchQuote finds the elements a Drive quote could have come from.
+//
+// Drive quotes what the commenter selected, which is usually a fragment of the
+// element holding it — commenting on one word of a label quotes that word. An
+// element holding the quote is therefore the match to fall back on; without it
+// anything but a comment on a whole label would be attributed to nothing.
+// A whole-element match still wins, so the common case keeps its precision.
+func matchQuote(hits []textHit, quote string) []textHit {
+	if quote == "" {
+		return nil
+	}
+	var exact, within []textHit
+	for _, h := range hits {
+		switch {
+		case h.text == quote:
+			exact = append(exact, h)
+		case strings.Contains(h.text, quote):
+			within = append(within, h)
+		}
+	}
+	if len(exact) > 0 {
+		return exact
+	}
+	return within
+}
 
 // uniqueSlides lists the distinct slides among the hits, in encounter order.
 func uniqueSlides(hits []textHit) []string {

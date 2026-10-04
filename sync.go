@@ -427,7 +427,14 @@ func resolvePresentation(ctx context.Context, client *gslide.Client, target stri
 // sync over them: the report states which source was used.
 func readComments(ctx context.Context, client *gslide.Client, presentationID string, live *slides.Presentation, withComments bool) *syncer.Comments {
 	if withComments {
-		return syncer.FromPresentation(live)
+		if c := syncer.FromPresentation(live); len(c.Items) > 0 {
+			return c
+		}
+		// An account outside the Developer Preview gets the comments view mode
+		// accepted and ignored, so a presentation with comments comes back
+		// without them and looks exactly like one that has none. Asking Drive
+		// is what tells the two apart; a deck that really has no comments pays
+		// one extra call for an answer that is then certain.
 	}
 	items, err := client.ListDriveComments(ctx, presentationID)
 	if err != nil {

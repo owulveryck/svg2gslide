@@ -73,7 +73,10 @@ func (r *Report) WriteText(w io.Writer) error {
 	// saying they are unavailable would be a false alarm.
 	if r.CommentSource == "unavailable" && r.PresentationID != "" {
 		b.WriteString("comments could not be read, so this report says nothing about them\n")
-	} else if r.CommentSource == "drive-fallback" {
+	} else if r.CommentSource == "drive-fallback" && r.hasComments() {
+		// Said only when there is an attribution to qualify: a deck with no
+		// comments reaches Drive on every sync, and the caveat would then be a
+		// standing line about nothing.
 		b.WriteString("comments read through Drive, whose anchors are opaque: they are tied to slides by quoted text\n")
 	}
 	if r.BackupURL != "" {
@@ -82,6 +85,25 @@ func (r *Report) WriteText(w io.Writer) error {
 
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+// hasComments reports whether any thread made it into the report, wherever it
+// landed.
+func (r *Report) hasComments() bool {
+	if len(r.UnattributedComments) > 0 {
+		return true
+	}
+	for _, s := range r.Slides {
+		if len(s.Comments) > 0 {
+			return true
+		}
+	}
+	for _, o := range r.Orphans {
+		if len(o.Comments) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func position(i int) string {

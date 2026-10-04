@@ -25,13 +25,18 @@ func (c *Client) GetPresentation(ctx context.Context, presentationID string) (*s
 	return pres, nil
 }
 
-// GetPresentationWithComments reads the presentation with its comment threads
-// and their anchors, and reports whether they came back.
+// GetPresentationWithComments reads the presentation asking for its comment
+// threads and their anchors, and reports whether the request was accepted.
 //
 // Comments are a Google Workspace Developer Preview feature: an account not
 // enrolled in the program, or without permission to view comments, gets a 403
 // or 400. That is not a failure of the sync — only of the comment precision —
 // so the error is swallowed and the caller told to fall back to Drive.
+//
+// An accepted request is not a promise that comments came back: the view mode
+// is also accepted and ignored. A response carrying no thread says nothing
+// either way, so the caller confirms it against Drive rather than reading it
+// as an absence of comments.
 func (c *Client) GetPresentationWithComments(ctx context.Context, presentationID string) (pres *slides.Presentation, withComments bool, err error) {
 	pres, err = retry.DoWithResult(ctx, "presentations.get+comments", func() (*slides.Presentation, error) {
 		return c.Slides.Presentations.Get(presentationID).
