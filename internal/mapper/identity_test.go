@@ -147,6 +147,84 @@ func TestOriginsRecordTheSourceNode(t *testing.T) {
 	})
 }
 
+// originsOfDoc maps a document at a realistic scale and returns the full
+// provenance, parts included.
+func originsOfDoc(t *testing.T, doc string) []ElementOrigin {
+	t.Helper()
+	root, err := svgpkg.Parse(strings.NewReader(doc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	sheet := svgpkg.ParseStylesheet("")
+	svgpkg.ApplyStylesheet(root, sheet)
+	m := New(Config{SlideID: "s", Scale: testScale, ViewBox: svgpkg.ViewBox{W: 1600, H: 900}}, sheet)
+	m.Map(root)
+	return m.Origins()
+}
+
+func originFor(t *testing.T, origins []ElementOrigin, locator string) ElementOrigin {
+	t.Helper()
+	for _, o := range origins {
+		if o.Locator == locator {
+			return o
+		}
+	}
+	t.Fatalf("no origin for %s", locator)
+	return ElementOrigin{}
+}
+
+// TestTextPartsNameTheNodeBehindEachWord is what makes a comment actionable: a
+// label drawn on a box becomes text *of* that box in Slides, so the object a
+// comment is anchored to is the shape, and only the parts can say which of the
+// labels around it carries the commented word.
+func TestTextPartsNameTheNodeBehindEachWord(t *testing.T) {
+	// A captioned box as hand-drawn diagrams write one: a rect with two
+	// <text> lines sitting on it.
+	origins := originsOfDoc(t, `<svg viewBox="0 0 1600 900">
+  <g>
+    <rect x="600" y="400" width="300" height="120" rx="12" fill="#DAF6F9"/>
+    <text x="750" y="450" text-anchor="middle" font-size="28" font-weight="bold">Capture</text>
+    <text x="750" y="490" text-anchor="middle" font-size="22">the intent</text>
+  </g>
+</svg>`)
+
+	box := originFor(t, origins, "/svg/g/rect")
+	if len(box.Parts) != 2 {
+		t.Fatalf("parts = %+v, want one per <text> swallowed by the box", box.Parts)
+	}
+	for i, want := range []struct{ locator, text string }{
+		{"/svg/g/text[1]", "Capture"},
+		{"/svg/g/text[2]", "the intent"},
+	} {
+		if got := box.Parts[i]; got.Locator != want.locator || got.Text != want.text {
+			t.Errorf("part %d = %s %q, want %s %q", i, got.Locator, got.Text, want.locator, want.text)
+		}
+	}
+
+	t.Run("the ranges are the ones a comment anchor speaks", func(t *testing.T) {
+		// UTF-16 code units over the text actually inserted, newline included:
+		// "Capture\nthe intent".
+		if p := box.Parts[0]; p.Start != 0 || p.End != 7 {
+			t.Errorf("first part spans [%d,%d), want [0,7)", p.Start, p.End)
+		}
+		if p := box.Parts[1]; p.Start != 8 || p.End != 18 {
+			t.Errorf("second part spans [%d,%d), want [8,18)", p.Start, p.End)
+		}
+	})
+}
+
+func TestTextPartsLeftOutWhenTheObjectIsTheNode(t *testing.T) {
+	// A lone label is its own object: naming a part would only repeat the
+	// origin, so the report keeps pointing at the node it already had.
+	origins := originsOfDoc(t, `<svg viewBox="0 0 1600 900">
+  <text x="100" y="100" font-size="28">Self-correcting</text>
+</svg>`)
+
+	if o := originFor(t, origins, "/svg/text"); len(o.Parts) != 0 {
+		t.Errorf("parts = %+v, want none for a label that is its own object", o.Parts)
+	}
+}
+
 func TestGroupIDForDerivesFromMembers(t *testing.T) {
 	m := New(Config{SlideID: "svg2gslide_0123456789"}, svgpkg.ParseStylesheet(""))
 	a := m.groupIDFor([]string{"x", "y"})

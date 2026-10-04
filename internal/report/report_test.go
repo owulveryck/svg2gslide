@@ -274,6 +274,83 @@ func TestUnavailableCommentsAreStated(t *testing.T) {
 	}
 }
 
+// partsScenario is a captioned box: one Slides object holding the text of two
+// <text> nodes, which is where the object alone stops being an answer.
+func partsScenario(comments *syncer.Comments) Input {
+	src := deck.Entry{
+		Source: "flow.svg", Label: "flow.svg", Data: []byte("<svg>v1</svg>"),
+		Key: "flow.svg", SlideID: "svg2gslide_box",
+	}
+	live := &slides.Page{
+		ObjectId:     src.SlideID,
+		PageElements: []*slides.PageElement{textBox("svg2gslide_box_rect", "Capture\nthe intent")},
+	}
+	pres := &slides.Presentation{PresentationId: "1AbC", Slides: []*slides.Page{live}}
+	st := &state.State{PresentationID: "1AbC", Entries: []state.Entry{{
+		Source: src.Source, Key: src.Key, SlideID: src.SlideID,
+		SourceHash: state.SourceHash(src.Data),
+		Pushed:     syncer.Fingerprint(live, false),
+		Origins: []state.Origin{{
+			ObjectID: "svg2gslide_box_rect", Key: "/svg/g/rect", Locator: "/svg/g/rect",
+			Tag: "rect", Text: "Capture the intent",
+			Parts: []state.OriginPart{
+				{Start: 0, End: 7, Locator: "/svg/g/text[1]", Tag: "text", Text: "Capture"},
+				{Start: 8, End: 18, Locator: "/svg/g/text[2]", Tag: "text", Text: "the intent"},
+			},
+		}},
+	}}}
+	plan := syncer.Reconcile([]deck.Entry{src}, st, pres, comments.OpenCounts(), syncer.Options{})
+	return Input{Plan: plan, State: st, Live: pres, Comments: comments, Now: fixedNow, DryRun: true}
+}
+
+func TestACommentResolvesToTheLabelNotTheBoxAroundIt(t *testing.T) {
+	driveThread := func(quote string) *syncer.Comments {
+		return &syncer.Comments{Source: syncer.SourceDrive, Items: []syncer.Comment{{
+			ID: "c1", Open: true, SlideID: "svg2gslide_box", ObjectID: "svg2gslide_box_rect",
+			QuotedText: quote, Confidence: syncer.ConfidenceQuoted,
+			Thread: []syncer.Post{{Text: "Remplacer par intention"}},
+		}}}
+	}
+	anchorOf := func(t *testing.T, in Input) *Anchor {
+		t.Helper()
+		r := Build(in)
+		if len(r.Slides[0].Comments) != 1 {
+			t.Fatalf("comments = %+v, want 1", r.Slides[0].Comments)
+		}
+		a := r.Slides[0].Comments[0].Anchor
+		if a == nil || a.SVG == nil {
+			t.Fatalf("anchor = %+v, want a source node", a)
+		}
+		return a
+	}
+
+	t.Run("a quoted fragment names the label holding it", func(t *testing.T) {
+		// What the report used to say here was "/svg/g/rect": the box, which
+		// has no text to edit.
+		if got := anchorOf(t, partsScenario(driveThread("Capture"))).SVG.Locator; got != "/svg/g/text[1]" {
+			t.Errorf("locator = %q, want the <text> carrying the quoted word", got)
+		}
+	})
+
+	t.Run("an anchor range names the label it falls in", func(t *testing.T) {
+		// The Slides preview gives no quote, only an offset in the box.
+		comments := driveThread("")
+		comments.Source = syncer.SourceSlides
+		comments.Items[0].Confidence = syncer.ConfidenceExact
+		comments.Items[0].Range = &syncer.TextRange{Start: 8, End: 18}
+		if got := anchorOf(t, partsScenario(comments)).SVG.Locator; got != "/svg/g/text[2]" {
+			t.Errorf("locator = %q, want the <text> the range falls in", got)
+		}
+	})
+
+	t.Run("an undecidable comment keeps the object's own node", func(t *testing.T) {
+		// Better the box than a label picked at random.
+		if got := anchorOf(t, partsScenario(driveThread("something else"))).SVG.Locator; got != "/svg/g/rect" {
+			t.Errorf("locator = %q, want the object's node when no part matches", got)
+		}
+	})
+}
+
 func TestDriveCaveatIsSaidOnlyWhenThereIsACommentToQualify(t *testing.T) {
 	src := deck.Entry{Source: "a.svg", Data: []byte("<svg/>"), Key: "a.svg", SlideID: "svg2gslide_aaa"}
 	page := &slides.Page{ObjectId: src.SlideID, PageElements: []*slides.PageElement{textBox("t", "Validation")}}

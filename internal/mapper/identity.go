@@ -3,6 +3,7 @@ package mapper
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -19,6 +20,24 @@ type ElementOrigin struct {
 	Locator  string // positional locator, always set
 	SVGID    string // id attribute of the source node, "" when it has none
 	Tag      string // SVG tag that produced the object
+	// Parts names the nodes whose text was merged into this object, each with
+	// the range it occupies in it. A shape that swallowed the labels drawn on
+	// it holds the text of nodes it is not, and so does a group of lines: the
+	// object alone answers "which box", the parts answer "which word".
+	// Empty when the object's text comes from the node it is.
+	Parts []TextPart
+}
+
+// TextPart is one source node's contribution to an object's text.
+type TextPart struct {
+	// Start and End delimit the contribution in the object's text, counted in
+	// UTF-16 code units the way the Slides API counts them — the same units a
+	// comment anchor's range uses.
+	Start, End int
+	Locator    string
+	SVGID      string
+	Tag        string
+	Text       string
 }
 
 // Origins returns the provenance of every object created so far, in creation
@@ -46,6 +65,36 @@ func (m *Mapper) idFor(e *svgpkg.Element) string {
 		Tag:      e.Tag,
 	})
 	return id
+}
+
+// addTextParts records where the text written into an object came from.
+//
+// Nothing is recorded when every part is the object's own node: there the
+// object already is the answer, and parts would only repeat it.
+func (m *Mapper) addTextParts(objectID string, parts []TextPart) {
+	for i := range m.origins {
+		o := &m.origins[i]
+		if o.ObjectID != objectID {
+			continue
+		}
+		if slices.ContainsFunc(parts, func(p TextPart) bool { return p.Locator != o.Locator }) {
+			o.Parts = parts
+		}
+		return
+	}
+}
+
+// partOf builds the part a run of text contributes, from the node that carries
+// it.
+func partOf(e *svgpkg.Element, start, end int, text string) TextPart {
+	return TextPart{
+		Start:   start,
+		End:     end,
+		Locator: svgpkg.Locator(e),
+		SVGID:   e.ID(),
+		Tag:     e.Tag,
+		Text:    text,
+	}
 }
 
 // groupIDFor returns the object ID of a group assembled from objects that do

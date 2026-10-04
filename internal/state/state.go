@@ -103,6 +103,23 @@ type Origin struct {
 	// the object holds now is what turns a drift into a reportable "this
 	// label was retyped" rather than an opaque fingerprint mismatch.
 	Text string `json:"text,omitempty"`
+	// Parts names the nodes whose text was merged into this object. A shape
+	// that holds the labels drawn on it is one object made of several nodes,
+	// and a comment on one of its words belongs to one of them, not to the
+	// shape. Absent for an object whose text is its own node's.
+	Parts []OriginPart `json:"parts,omitempty"`
+}
+
+// OriginPart is one source node's contribution to an object's text.
+type OriginPart struct {
+	// Start and End delimit the contribution in the object's text, in UTF-16
+	// code units — the units a Slides comment anchor's range speaks.
+	Start   int    `json:"start"`
+	End     int    `json:"end"`
+	Locator string `json:"locator"`
+	SVGID   string `json:"svgId,omitempty"`
+	Tag     string `json:"tag,omitempty"`
+	Text    string `json:"text,omitempty"`
 }
 
 // DefaultPath returns the state file path for a deck rooted at dir synced with

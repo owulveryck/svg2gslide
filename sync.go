@@ -648,6 +648,17 @@ func originsOf(res *convert.Result) []state.Origin {
 	}
 	out := make([]state.Origin, 0, len(res.Origins))
 	for _, o := range res.Origins {
+		var parts []state.OriginPart
+		for _, p := range o.Parts {
+			parts = append(parts, state.OriginPart{
+				Start:   p.Start,
+				End:     p.End,
+				Locator: p.Locator,
+				SVGID:   p.SVGID,
+				Tag:     p.Tag,
+				Text:    strings.Join(strings.Fields(p.Text), " "),
+			})
+		}
 		out = append(out, state.Origin{
 			ObjectID: o.ObjectID,
 			Key:      o.Key,
@@ -655,6 +666,7 @@ func originsOf(res *convert.Result) []state.Origin {
 			SVGID:    o.SVGID,
 			Tag:      o.Tag,
 			Text:     strings.Join(strings.Fields(texts[o.ObjectID]), " "),
+			Parts:    parts,
 		})
 	}
 	return out

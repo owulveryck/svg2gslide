@@ -3,6 +3,7 @@ package report
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"google.golang.org/api/slides/v1"
@@ -216,10 +217,54 @@ func comments(all *syncer.Comments, slideID string, origins []state.Origin) []Co
 		var n *Node
 		if o, ok := byID[c.ObjectID]; ok {
 			n = node(o)
+			if p := partFor(o, c); p != nil {
+				n = partNode(*p)
+			}
 		}
 		out = append(out, comment(c, n))
 	}
 	return out
+}
+
+// partFor narrows a comment from the object it is anchored to down to the one
+// source node it is about.
+//
+// A shape holding the labels drawn on it is one Slides object made of several
+// SVG nodes: "the box around it" is not an answer anybody can act on, and the
+// node carrying the commented word is. The anchor's range says which one when
+// the Slides preview gave one; otherwise the quoted text does, matched as
+// syncer.FromDrive matches it — the whole part first, then the part holding
+// the fragment. Neither one deciding leaves the object's own node, which is
+// where the report stood before.
+func partFor(o state.Origin, c syncer.Comment) *state.OriginPart {
+	if len(o.Parts) == 0 {
+		return nil
+	}
+	if c.Range != nil {
+		for i, p := range o.Parts {
+			if int64(p.Start) < c.Range.End && c.Range.Start < int64(p.End) {
+				return &o.Parts[i]
+			}
+		}
+	}
+	quote := strings.Join(strings.Fields(c.QuotedText), " ")
+	if quote == "" {
+		return nil
+	}
+	var within *state.OriginPart
+	for i, p := range o.Parts {
+		switch {
+		case p.Text == quote:
+			return &o.Parts[i]
+		case within == nil && strings.Contains(p.Text, quote):
+			within = &o.Parts[i]
+		}
+	}
+	return within
+}
+
+func partNode(p state.OriginPart) *Node {
+	return &Node{Locator: p.Locator, ID: p.SVGID, Tag: p.Tag}
 }
 
 func comment(c syncer.Comment, n *Node) Comment {

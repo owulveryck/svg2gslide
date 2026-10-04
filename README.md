@@ -235,6 +235,12 @@ Each slide's object ID is derived from its source path, and each shape's from
 the SVG node that produced it. That is what makes a comment left on a shape
 still resolve to the right source node after you edit the SVG elsewhere.
 
+One Slides object is not always one SVG node: a label drawn on a box becomes
+the text *of* that box, and several `<text>` lines become one text frame. The
+sync records which node wrote which characters, so a comment on one word is
+reported against the `<text>` carrying it rather than against the rectangle
+around it — the difference between a locator you can edit and one you cannot.
+
 For an HTML deck, a slide is identified by the `id` of its `<svg>` (or of its
 `<section>`). Without one it falls back to the inline SVG's position, and sync
 says so — such a slide loses its identity if you reorder the HTML. Giving your

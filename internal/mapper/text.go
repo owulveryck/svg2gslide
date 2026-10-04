@@ -413,6 +413,7 @@ func (m *Mapper) layoutText(e *svgpkg.Element, lines []*textLine, anchor string,
 			line       int
 		}
 		var spans []span
+		var parts []TextPart
 		pos := 0
 		for i, l := range lines {
 			if i > 0 {
@@ -422,11 +423,15 @@ func (m *Mapper) layoutText(e *svgpkg.Element, lines []*textLine, anchor string,
 			for j, r := range l.runs {
 				n := len(utf16.Encode([]rune(r.text)))
 				spans = append(spans, span{pos, pos + n, styles[i][j], r.text, i})
+				// The same ranges answer a later question: a comment landing
+				// at some offset in this box came from the node of that run.
+				parts = append(parts, partOf(r.el, pos, pos+n, r.text))
 				content.WriteString(r.text)
 				pos += n
 			}
 		}
 		m.reqs = append(m.reqs, &slides.Request{InsertText: &slides.InsertTextRequest{ObjectId: id, Text: content.String()}})
+		m.addTextParts(id, parts)
 		m.reqs = append(m.reqs, &slides.Request{UpdateTextStyle: &slides.UpdateTextStyleRequest{
 			ObjectId:  id,
 			Style:     m.slidesTextStyle(base, k),
