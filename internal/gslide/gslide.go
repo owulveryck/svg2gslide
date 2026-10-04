@@ -41,6 +41,17 @@ func NewClient(ctx context.Context, credentialsFile string) (*Client, error) {
 	return &Client{Slides: slidesSrv, Drive: driveSrv}, nil
 }
 
+// CreatePresentation creates an empty presentation and returns its ID.
+func (c *Client) CreatePresentation(ctx context.Context, title string) (string, error) {
+	pres, err := retry.DoWithResult(ctx, "presentations.create", func() (*slides.Presentation, error) {
+		return c.Slides.Presentations.Create(&slides.Presentation{Title: title}).Context(ctx).Do()
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to create presentation: %w", err)
+	}
+	return pres.PresentationId, nil
+}
+
 // PageSize returns the presentation page size in EMU.
 func (c *Client) PageSize(ctx context.Context, presentationID string) (w, h float64, err error) {
 	pres, err := retry.DoWithResult(ctx, "presentations.get", func() (*slides.Presentation, error) {

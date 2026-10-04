@@ -4,6 +4,36 @@ Converts an SVG file into a **native** Google Slides slide (editable shapes,
 lines and text boxes — not an image), appended to the end of an existing
 presentation.
 
+## Login
+
+Put your "Desktop app" OAuth client JSON where the tool looks for it, then log in:
+
+```sh
+mkdir -p ~/.config/svg2gslide && cp ~/Downloads/client_secret_*.json ~/.config/svg2gslide/client.json
+go run . login
+```
+
+Opens your browser for Google consent, receives the callback on `127.0.0.1` and caches the
+token in `~/.local/state/svg2gslide/token.json` (mode `0600`). Without a cached token, any
+conversion triggers the same flow. Use `-presentation new` to create a fresh presentation
+instead of passing an ID.
+
+Both locations follow the [XDG Base Directory Specification][xdg] — `$XDG_CONFIG_HOME` for the
+client you provide, `$XDG_STATE_HOME` for the token the tool writes:
+
+| File | Default | Overridden by |
+|---|---|---|
+| OAuth client | `~/.config/svg2gslide/client.json` | `-credentials`, `$SVG2GSLIDE_CREDENTIALS`, `$XDG_CONFIG_HOME` |
+| Cached token | `~/.local/state/svg2gslide/token.json` | `$XDG_STATE_HOME` |
+
+[xdg]: https://specifications.freedesktop.org/basedir-spec/latest/
+
+> **Upgrading from an earlier version:** the token used to be cached in
+> `~/.credentials/slideappscripter-token.json` and the client read from
+> `~/.config/gcloud/slideappscripter-client.json`. Neither is consulted any more — move your
+> client JSON to the path above and run `login` once. `$SLIDES_CREDENTIALS` still works but
+> is deprecated in favour of `$SVG2GSLIDE_CREDENTIALS`.
+
 ## Usage
 
 ```sh
@@ -36,8 +66,8 @@ Flags:
 |---|---|
 | `-svg` | input SVG file, or HTML page with inline SVGs (default: stdin) |
 | `-slides` | HTML input only: SVGs to convert, 1-based (`1-3,7,10-`; default: all) |
-| `-presentation` | target presentation ID (required) |
-| `-credentials` | OAuth client or service account JSON (default: `$SLIDES_CREDENTIALS`, then `~/.config/gcloud/slideappscripter-client.json`) |
+| `-presentation` | target presentation ID or URL (required); `new` creates a presentation named after the SVG and prints its URL |
+| `-credentials` | OAuth client or service account JSON (default: `$SVG2GSLIDE_CREDENTIALS`, then `~/.config/svg2gslide/client.json`) |
 | `-phase` | force the active phase (default: the SVG's `data-active-phase` attribute) |
 | `-out-thumbnail` | download the new slide's PNG thumbnail to this path (`name-NN.png` per slide for an HTML input) |
 | `-export-pdf` | export the whole presentation as PDF |

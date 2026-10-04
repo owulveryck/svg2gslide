@@ -13,13 +13,14 @@ import (
 
 	"google.golang.org/api/slides/v1"
 
+	"github.com/owulveryck/svg2gslide/internal/auth"
 	"github.com/owulveryck/svg2gslide/internal/gslide"
 )
 
 func main() {
 	var (
 		presentation = flag.String("presentation", "", "presentation ID (required)")
-		credentials  = flag.String("credentials", os.Getenv("SLIDES_CREDENTIALS"), "OAuth client or service account JSON")
+		credentials  = flag.String("credentials", "", "OAuth client or service account JSON (default: $SVG2GSLIDE_CREDENTIALS)")
 		deleteSlide  = flag.String("delete-slide", "", "comma-separated object IDs of slides to delete")
 		exportPDF    = flag.String("export-pdf", "", "export the presentation as PDF to this path")
 		list         = flag.Bool("list", false, "list slides with element counts")
@@ -33,7 +34,7 @@ func main() {
 		os.Exit(2)
 	}
 	ctx := context.Background()
-	client, err := gslide.NewClient(ctx, *credentials)
+	client, err := gslide.NewClient(ctx, auth.ResolveCredentials(*credentials))
 	if err != nil {
 		fail(err)
 	}

@@ -17,6 +17,7 @@ import (
 
 	"google.golang.org/api/slides/v1"
 
+	"github.com/owulveryck/svg2gslide/internal/auth"
 	"github.com/owulveryck/svg2gslide/internal/convert"
 	"github.com/owulveryck/svg2gslide/internal/gslide"
 	"github.com/owulveryck/svg2gslide/internal/htmlsvg"
@@ -24,11 +25,19 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "login" {
+		if err := login(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	flag.Usage = usage
 	var (
 		svgPath      = flag.String("svg", "", "input SVG file, or HTML page with inline SVGs (one slide each) (default: stdin)")
 		slideSel     = flag.String("slides", "", "HTML input only: SVGs to convert, 1-based, e.g. \"1-3,7,10-\" (default: all)")
-		presentation = flag.String("presentation", "", "target Google Slides presentation ID (required)")
-		credentials  = flag.String("credentials", "", "OAuth client or service account JSON (default: $SLIDES_CREDENTIALS)")
+		presentation = flag.String("presentation", "", "target Google Slides presentation ID or URL, or \"new\" to create one (required)")
+		credentials  = flag.String("credentials", "", "OAuth client or service account JSON (default: $SVG2GSLIDE_CREDENTIALS)")
 		phase        = flag.String("phase", "", "active phase (default: the SVG's data-active-phase attribute)")
 		outThumbnail = flag.String("out-thumbnail", "", "download the new slide's PNG thumbnail to this path")
 		exportPDF    = flag.String("export-pdf", "", "export the whole presentation as PDF to this path")
@@ -47,6 +56,7 @@ func main() {
 		return
 	}
 	if *presentation == "" {
+		fmt.Fprintln(os.Stderr, "error: -presentation is required (an ID, a URL, or \"new\" to create a presentation)")
 		flag.Usage()
 		os.Exit(2)
 	}
@@ -69,23 +79,25 @@ func run(ctx context.Context, svgPath, slideSel, presentationID, credentials, ph
 		return err
 	}
 
-	if credentials == "" {
-		credentials = os.Getenv("SLIDES_CREDENTIALS")
-	}
-	if credentials == "" {
-		// Reuse the agentigslide OAuth client if present, so the cached
-		// token works without a new interactive flow.
-		if home, err := os.UserHomeDir(); err == nil {
-			p := filepath.Join(home, ".config", "gcloud", "slideappscripter-client.json")
-			if _, err := os.Stat(p); err == nil {
-				credentials = p
-			}
-		}
-	}
+	credentials = auth.ResolveCredentials(credentials)
 
 	client, err := gslide.NewClient(ctx, credentials)
 	if err != nil {
 		return err
+	}
+
+	if presentationID == "new" {
+		title := strings.TrimSuffix(filepath.Base(svgPath), filepath.Ext(svgPath))
+		if svgPath == "" {
+			title = "svg2gslide"
+		}
+		presentationID, err = client.CreatePresentation(ctx, title)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("presentation created: https://docs.google.com/presentation/d/%s/edit\n", presentationID)
+	} else if id, err := convert.ExtractPresentationID(presentationID); err == nil {
+		presentationID = id
 	}
 
 	pageW, pageH, err := client.PageSize(ctx, presentationID)
@@ -341,4 +353,22 @@ func insertImages(ctx context.Context, client *gslide.Client, presentationID str
 		q.CreateImage.Url = urls[q.CreateImage.Url]
 	}
 	return client.BatchUpdate(ctx, presentationID, reqs)
+}
+
+func usage() {
+	fmt.Fprintf(os.Stderr, "Usage:\n  %[1]s login [-credentials file]\n  %[1]s [flags] -presentation <id|url|new> [-svg file]\n\nFlags:\n", filepath.Base(os.Args[0]))
+	flag.PrintDefaults()
+}
+
+// login runs the browser authorization flow and caches the token.
+func login(args []string) error {
+	fs := flag.NewFlagSet("login", flag.ExitOnError)
+	credentials := fs.String("credentials", "", "OAuth client JSON (default: $SVG2GSLIDE_CREDENTIALS)")
+	_ = fs.Parse(args)
+	path, err := auth.Login(context.Background(), auth.ResolveCredentials(*credentials))
+	if err != nil {
+		return err
+	}
+	fmt.Println("logged in; token saved to", path)
+	return nil
 }
