@@ -19,8 +19,15 @@
 # Except the GitHub Actions workflows
 !.github/workflows/*.yml
 
-# Except the fixture required by internal/svg tests
-!testdata/sdlc-phase-8.svg
+# Except the fixtures required by the tests
+!testdata/*.svg
+!testdata/*.html
+!testdata/*.txt
+
+# Except a deck's sync state and manifest: both belong next to the sources
+# they describe, and their diffs are meant to be read.
+!.svg2gslide.json
+!deck.txt
 
 # Except directories (needed to recurse into them)
 !*/

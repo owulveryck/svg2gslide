@@ -42,7 +42,9 @@ type Mapper struct {
 	sheet    *svgpkg.Stylesheet
 	reqs     []*slides.Request
 	warnings []string
-	n        int
+
+	idSeq   map[string]int  // object ID base → number already handed out
+	origins []ElementOrigin // provenance of every object created, in order
 
 	grads  map[string]*gradient
 	pageBG rgba // current page background (composited full-page layers)
@@ -72,7 +74,7 @@ func New(cfg Config, sheet *svgpkg.Stylesheet) *Mapper {
 	if cfg.FontFamily == "" {
 		cfg.FontFamily = "Arial"
 	}
-	return &Mapper{cfg: cfg, sheet: sheet, pageBG: white, grads: map[string]*gradient{}}
+	return &Mapper{cfg: cfg, sheet: sheet, pageBG: white, grads: map[string]*gradient{}, idSeq: map[string]int{}}
 }
 
 // Map converts the SVG root into Slides requests targeting cfg.SlideID.
@@ -177,11 +179,6 @@ func (m *Mapper) warnf(format string, args ...any) {
 	m.warnings = append(m.warnings, fmt.Sprintf(format, args...))
 }
 
-func (m *Mapper) nextID() string {
-	m.n++
-	return fmt.Sprintf("%s_e%03d", m.cfg.SlideID, m.n)
-}
-
 // toEMU converts SVG user coordinates to page EMU.
 func (m *Mapper) toEMU(x, y float64) (float64, float64) {
 	return (x-m.cfg.ViewBox.X)*m.cfg.Scale + m.cfg.OffX,
@@ -229,7 +226,7 @@ func (m *Mapper) mapRect(e *svgpkg.Element, mat svgpkg.Matrix) {
 		m.emitPill(e, x, y, w, h, mat)
 		return
 	}
-	id := m.nextID()
+	id := m.idFor(e)
 	ex, ey := m.toEMU(x, y)
 	if rot {
 		// Vertical pill: a horizontal terminator turned 90°.
@@ -247,7 +244,7 @@ func (m *Mapper) mapCircle(e *svgpkg.Element, mat svgpkg.Matrix) {
 		return
 	}
 	sx, sy := mat.ScaleFactors()
-	id := m.nextID()
+	id := m.idFor(e)
 	ex, ey := m.toEMU(cx-r*sx, cy-r*sy)
 	m.createShape(id, "ELLIPSE", ex, ey, m.lenEMU(2*r*sx), m.lenEMU(2*r*sy), 0)
 	m.styleShape(id, e, mat)
@@ -261,7 +258,7 @@ func (m *Mapper) mapEllipse(e *svgpkg.Element, mat svgpkg.Matrix) {
 	if rx <= 0 || ry <= 0 {
 		return
 	}
-	id := m.nextID()
+	id := m.idFor(e)
 	ex, ey := m.toEMU(cx-rx, cy-ry)
 	m.createShape(id, "ELLIPSE", ex, ey, m.lenEMU(2*rx), m.lenEMU(2*ry), 0)
 	m.styleShape(id, e, mat)
@@ -290,7 +287,7 @@ func (m *Mapper) map3DBox(e *svgpkg.Element, mat svgpkg.Matrix) bool {
 			maxX, maxY = math.Max(maxX, x), math.Max(maxY, y)
 		}
 	}
-	id := m.nextID()
+	id := m.idFor(e)
 	ex, ey := m.toEMU(minX, minY)
 	m.createShape(id, "CUBE", ex, ey, m.lenEMU(maxX-minX), m.lenEMU(maxY-minY), 0)
 	m.styleShape(id, faces[0], mat)
@@ -347,7 +344,7 @@ func (m *Mapper) mapCylinder(e *svgpkg.Element, mat svgpkg.Matrix) bool {
 	}
 	_, _, lw, lh := bbox(lidBox)
 
-	id := m.nextID()
+	id := m.idFor(e)
 	if lw >= lh {
 		// Flat lid: upright cylinder.
 		ex, ey := m.toEMU(minX, minY)
@@ -444,7 +441,7 @@ func (m *Mapper) mapPolygonPts(e *svgpkg.Element, pts [][2]float64, mat svgpkg.M
 	case len(pts) == 4 && isAxisAlignedRect(pts):
 		tpts := applyAll(mat, pts)
 		minX, minY, w, h := bbox(tpts)
-		id := m.nextID()
+		id := m.idFor(e)
 		ex, ey := m.toEMU(minX, minY)
 		m.createShape(id, "RECTANGLE", ex, ey, m.lenEMU(w), m.lenEMU(h), 0)
 		m.styleShape(id, e, mat)
@@ -456,14 +453,14 @@ func (m *Mapper) mapPolygonPts(e *svgpkg.Element, pts [][2]float64, mat svgpkg.M
 		tpts := applyAll(mat, pts)
 		if isDiamond(tpts) {
 			minX, minY, w, h := bbox(tpts)
-			id := m.nextID()
+			id := m.idFor(e)
 			ex, ey := m.toEMU(minX, minY)
 			m.createShape(id, "DIAMOND", ex, ey, m.lenEMU(w), m.lenEMU(h), 0)
 			m.styleShape(id, e, mat)
 			return
 		}
 		minX, minY, w, h := bbox(tpts)
-		id := m.nextID()
+		id := m.idFor(e)
 		ex, ey := m.toEMU(minX, minY)
 		m.createShape(id, "RECTANGLE", ex, ey, m.lenEMU(w), m.lenEMU(h), 0)
 		m.styleShape(id, e, mat)
@@ -564,7 +561,7 @@ func (m *Mapper) emitTriangle(e *svgpkg.Element, pts [][2]float64, apex [2]float
 	ecx, ecy := m.toEMU(cx, cy)
 	wEMU, hEMU := m.lenEMU(perp), m.lenEMU(along)
 
-	id := m.nextID()
+	id := m.idFor(e)
 	cos, sin := math.Cos(rot), math.Sin(rot)
 	tx := ecx - (cos*wEMU/2 - sin*hEMU/2)
 	ty := ecy - (sin*wEMU/2 + cos*hEMU/2)
@@ -726,7 +723,7 @@ func (m *Mapper) mapPath(e *svgpkg.Element, mat svgpkg.Matrix) {
 		}
 		tpts := applyAll(mat, outline)
 		minX, minY, w, h := bbox(tpts)
-		id := m.nextID()
+		id := m.idFor(e)
 		ex, ey := m.toEMU(minX, minY)
 		m.createShape(id, "ROUND_RECTANGLE", ex, ey, m.lenEMU(w), m.lenEMU(h), 0)
 		m.styleShape(id, e, mat)
@@ -777,7 +774,7 @@ func (m *Mapper) emitPathPieces(e *svgpkg.Element, pieces []pathPiece, mat svgpk
 	if len(ids) > 1 {
 		// One path = one editable object.
 		m.reqs = append(m.reqs, &slides.Request{GroupObjects: &slides.GroupObjectsRequest{
-			GroupObjectId:     m.nextID(),
+			GroupObjectId:     m.idFor(e),
 			ChildrenObjectIds: ids,
 		}})
 	}
@@ -842,7 +839,7 @@ func (m *Mapper) emitArc(e *svgpkg.Element, p pathPiece, mat svgpkg.Matrix) stri
 		scaleY = -1
 		_, ty = m.toEMU(0, cy+ry)
 	}
-	id := m.nextID()
+	id := m.idFor(e)
 	m.reqs = append(m.reqs, &slides.Request{CreateShape: &slides.CreateShapeRequest{
 		ObjectId:  id,
 		ShapeType: "ARC",
@@ -881,7 +878,7 @@ func (m *Mapper) createLinePieceMarkers(e *svgpkg.Element, category string, x1, 
 	if ey2 < ey1 {
 		scaleY = -1
 	}
-	id := m.nextID()
+	id := m.idFor(e)
 	m.reqs = append(m.reqs, &slides.Request{CreateLine: &slides.CreateLineRequest{
 		ObjectId: id,
 		Category: category,

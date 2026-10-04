@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 180" font-family="Arial">
+  <rect id="auth-box" x="20" y="30" width="120" height="50" fill="#dbeafe" stroke="#1d4ed8"/>
+  <text id="auth-label" x="80" y="60" text-anchor="middle" font-size="12">Service A</text>
+  <rect id="validation" x="180" y="30" width="120" height="50" fill="#dcfce7" stroke="#15803d"/>
+  <text id="validation-label" x="240" y="60" text-anchor="middle" font-size="12">Validation</text>
+</svg>

@@ -21,8 +21,13 @@ type Input struct {
 	SVG          io.Reader // SVG document
 	Label        string    // used in error messages ("<stdin>", filename, "upload")
 	PageW, PageH float64   // presentation page size in EMU
-	Phase        string    // "" → use the SVG's data-active-phase attribute
-	Verbose      bool      // passed to mapper.Config
+	// SlideID is the object ID to give the created slide. Leave it empty to
+	// get a random one, which is what a one-shot append wants; sync passes
+	// the deterministic ID derived from the source so the slide can be found
+	// again on a later run.
+	SlideID string
+	Phase   string // "" → use the SVG's data-active-phase attribute
+	Verbose bool   // passed to mapper.Config
 	// TextTransform applies CSS text-transform (uppercase, …) like
 	// browsers do. Off by default: common SVG rasterizers (librsvg, resvg)
 	// ignore it, and the text stays editable in its original case.
@@ -41,6 +46,10 @@ type Result struct {
 	// requests carry a placeholder URL to replace with a public URL (see
 	// SetImageURLs) or to drop (DropEmbeddedImages).
 	Images []mapper.EmbeddedImage
+	// Origins maps every created object back to the SVG node that produced
+	// it, which is what lets a sync report a drifted text or an anchored
+	// comment as a node to fix in the source.
+	Origins []mapper.ElementOrigin
 }
 
 // SetImageURLs substitutes the hosted URL of each embedded image.
@@ -113,7 +122,10 @@ func Convert(in Input) (*Result, error) {
 	offX := (in.PageW - vb.W*scale) / 2
 	offY := (in.PageH - vb.H*scale) / 2
 
-	slideID := "svg2gslide_" + randomSuffix()
+	slideID := in.SlideID
+	if slideID == "" {
+		slideID = "svg2gslide_" + randomSuffix()
+	}
 	m := mapper.New(mapper.Config{
 		SlideID:    slideID,
 		Phase:      phase,
@@ -136,7 +148,7 @@ func Convert(in Input) (*Result, error) {
 		SlideLayoutReference: &slides.LayoutReference{PredefinedLayout: "BLANK"},
 	}}}, reqs...)
 
-	return &Result{SlideID: slideID, Phase: phase, Requests: all, Warnings: warnings, Images: m.Images()}, nil
+	return &Result{SlideID: slideID, Phase: phase, Requests: all, Warnings: warnings, Images: m.Images(), Origins: m.Origins()}, nil
 }
 
 // fontFamily extracts the first font of the root font-family attribute.

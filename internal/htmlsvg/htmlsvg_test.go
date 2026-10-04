@@ -77,6 +77,39 @@ func TestExtract(t *testing.T) {
 	}
 }
 
+func TestExtractID(t *testing.T) {
+	const doc = `<!DOCTYPE html>
+<html><body>
+<section class="slide" id="intro"><svg viewBox="0 0 1 1"><rect/></svg></section>
+<section class="slide" id="ignored"><svg id="own" viewBox="0 0 1 1"><rect/></svg></section>
+<section class="slide"><svg viewBox="0 0 1 1"><rect/></svg></section>
+</body></html>`
+
+	svgs, err := Extract(strings.NewReader(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(svgs) != 3 {
+		t.Fatalf("got %d svgs, want 3", len(svgs))
+	}
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"falls back to the slide container id", svgs[0].ID, "intro"},
+		{"the svg's own id wins", svgs[1].ID, "own"},
+		{"empty when neither carries one", svgs[2].ID, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Errorf("ID = %q, want %q", tt.got, tt.want)
+			}
+		})
+	}
+}
+
 func TestExtractWithoutSlides(t *testing.T) {
 	svgs, err := Extract(strings.NewReader(`<html><body><p>x</p><svg viewBox="0 0 1 1"><svg><rect/></svg></svg><button><svg/></button></body></html>`))
 	if err != nil {

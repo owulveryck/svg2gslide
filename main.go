@@ -9,28 +9,35 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"google.golang.org/api/slides/v1"
 
 	"github.com/owulveryck/svg2gslide/internal/auth"
 	"github.com/owulveryck/svg2gslide/internal/convert"
+	"github.com/owulveryck/svg2gslide/internal/deck"
 	"github.com/owulveryck/svg2gslide/internal/gslide"
-	"github.com/owulveryck/svg2gslide/internal/htmlsvg"
 	"github.com/owulveryck/svg2gslide/internal/mapper"
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "login" {
-		if err := login(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			os.Exit(1)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "login":
+			if err := login(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				os.Exit(1)
+			}
+			return
+		case "sync":
+			if err := syncCommand(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				os.Exit(1)
+			}
+			return
 		}
-		return
 	}
 	flag.Usage = usage
 	var (
@@ -107,8 +114,8 @@ func run(ctx context.Context, svgPath, slideSel, presentationID, credentials, ph
 
 	for _, src := range sources {
 		res, err := convert.Convert(convert.Input{
-			SVG:     bytes.NewReader(src.data),
-			Label:   src.label,
+			SVG:     bytes.NewReader(src.Data),
+			Label:   src.Label,
 			PageW:   pageW,
 			PageH:   pageH,
 			Phase:   phase,
@@ -131,16 +138,16 @@ func run(ctx context.Context, svgPath, slideSel, presentationID, credentials, ph
 			}
 		}
 		if err := appendSlide(ctx, client, presentationID, res); err != nil {
-			return fmt.Errorf("%s: %w", src.label, err)
+			return fmt.Errorf("%s: %w", src.Label, err)
 		}
-		fmt.Printf("%s: slide %s created (%d requests, phase %q)\n", src.label, res.SlideID, len(res.Requests), res.Phase)
+		fmt.Printf("%s: slide %s created (%d requests, phase %q)\n", src.Label, res.SlideID, len(res.Requests), res.Phase)
 		fmt.Printf("https://docs.google.com/presentation/d/%s/edit#slide=id.%s\n", presentationID, res.SlideID)
 
 		if outThumbnail != "" {
 			path := outThumbnail
 			if len(sources) > 1 {
 				ext := filepath.Ext(path)
-				path = fmt.Sprintf("%s-%02d%s", strings.TrimSuffix(path, ext), src.index, ext)
+				path = fmt.Sprintf("%s-%02d%s", strings.TrimSuffix(path, ext), src.HTMLIndex, ext)
 			}
 			if err := client.FetchSlideThumbnail(ctx, presentationID, res.SlideID, path); err != nil {
 				return err
@@ -184,94 +191,13 @@ func appendSlide(ctx context.Context, client *gslide.Client, presentationID stri
 	return nil
 }
 
-// source is one SVG document to turn into a slide.
-type source struct {
-	index int // 1-based position in an HTML input, 0 for a bare SVG
-	label string
-	data  []byte
-}
-
 // loadSources reads the input (file or stdin): a bare SVG gives one source,
 // an HTML page one source per selected inline SVG.
-func loadSources(path, slideSel string) ([]source, error) {
-	var (
-		data  []byte
-		err   error
-		label = path
-	)
-	if path == "" {
-		data, err = io.ReadAll(os.Stdin)
-		label = "<stdin>"
-	} else {
-		data, err = os.ReadFile(path)
-	}
-	if err != nil {
-		return nil, err
-	}
-	if !htmlsvg.IsHTML(data) {
-		if slideSel != "" {
-			return nil, fmt.Errorf("-slides requires an HTML input")
-		}
-		return []source{{label: label, data: data}}, nil
-	}
-
-	svgs, err := htmlsvg.Extract(bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", label, err)
-	}
-	keep, err := parseSelection(slideSel)
-	if err != nil {
-		return nil, err
-	}
-	var out []source
-	for _, s := range svgs {
-		if !keep(s.Index) {
-			continue
-		}
-		l := fmt.Sprintf("%s#%d", label, s.Index)
-		if s.Title != "" {
-			l += " (" + s.Title + ")"
-		}
-		out = append(out, source{index: s.Index, label: l, data: s.Data})
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("%s: no inline <svg> selected (%d found)", label, len(svgs))
-	}
-	return out, nil
-}
-
-// parseSelection parses a list of 1-based indexes and ranges ("1-3,7,10-").
-func parseSelection(sel string) (func(int) bool, error) {
-	if strings.TrimSpace(sel) == "" {
-		return func(int) bool { return true }, nil
-	}
-	type span struct{ lo, hi int }
-	var spans []span
-	for part := range strings.SplitSeq(sel, ",") {
-		part = strings.TrimSpace(part)
-		loS, hiS, isRange := strings.Cut(part, "-")
-		lo, err := strconv.Atoi(loS)
-		if err != nil || lo < 1 {
-			return nil, fmt.Errorf("-slides: invalid item %q", part)
-		}
-		hi := lo
-		if isRange {
-			if hiS == "" {
-				hi = int(^uint(0) >> 1)
-			} else if hi, err = strconv.Atoi(hiS); err != nil || hi < lo {
-				return nil, fmt.Errorf("-slides: invalid range %q", part)
-			}
-		}
-		spans = append(spans, span{lo, hi})
-	}
-	return func(i int) bool {
-		for _, s := range spans {
-			if i >= s.lo && i <= s.hi {
-				return true
-			}
-		}
-		return false
-	}, nil
+//
+// The append path deliberately passes no identity to the converter, so every
+// slide gets a fresh random ID. Only sync needs slides it can find again.
+func loadSources(path, slideSel string) ([]deck.Entry, error) {
+	return deck.Resolve([]string{path}, []string{path}, deck.Options{Selection: slideSel})
 }
 
 // dry converts each SVG against a default 16:9 page and prints what would
@@ -292,8 +218,8 @@ func dry(svgPath, slideSel, phase string, verbose, textTransform, connect bool) 
 	return nil
 }
 
-func dryOne(src source, phase string, verbose, textTransform, connect bool) error {
-	res, err := convert.Convert(convert.Input{SVG: bytes.NewReader(src.data), Label: src.label, PageW: 9144000, PageH: 5143500, Phase: phase, Verbose: verbose, TextTransform: textTransform, ConnectCurves: connect})
+func dryOne(src deck.Entry, phase string, verbose, textTransform, connect bool) error {
+	res, err := convert.Convert(convert.Input{SVG: bytes.NewReader(src.Data), Label: src.Label, PageW: 9144000, PageH: 5143500, Phase: phase, Verbose: verbose, TextTransform: textTransform, ConnectCurves: connect})
 	if err != nil {
 		return err
 	}
@@ -329,7 +255,7 @@ func dryOne(src source, phase string, verbose, textTransform, connect bool) erro
 		}
 	}
 	fmt.Printf("%s: %d requests, textboxes=%d, text-in-shapes=%d, connections=%d, groups=%d, shapes/lines=%v\n",
-		src.label, len(res.Requests), counts["TEXT_BOX"], inShape, conns, groups, counts)
+		src.Label, len(res.Requests), counts["TEXT_BOX"], inShape, conns, groups, counts)
 	if verbose {
 		for _, w := range res.Warnings {
 			fmt.Fprintln(os.Stderr, "  [approx]", w)
@@ -356,7 +282,18 @@ func insertImages(ctx context.Context, client *gslide.Client, presentationID str
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "Usage:\n  %[1]s login [-credentials file]\n  %[1]s [flags] -presentation <id|url|new> [-svg file]\n\nFlags:\n", filepath.Base(os.Args[0]))
+	fmt.Fprintf(os.Stderr, `Usage:
+  %[1]s login [-credentials file]
+  %[1]s [flags] -presentation <id|url|new> [-svg file]      append one input
+  %[1]s sync -presentation <id|url|new> [flags] [file...]   reconcile a deck
+
+Appending is the one-shot form: the input becomes new slides at the end of the
+deck. Use "sync" to keep a presentation in step with an ordered list of SVGs,
+replacing only what changed and reporting what a human edited or commented on
+("%[1]s sync -h" for its flags).
+
+Flags:
+`, filepath.Base(os.Args[0]))
 	flag.PrintDefaults()
 }
 

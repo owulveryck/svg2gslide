@@ -1,0 +1,3 @@
+# the deck, in order
+sync-a.svg
+sync-b.svg

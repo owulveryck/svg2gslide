@@ -232,7 +232,7 @@ func (m *Mapper) mapSemicircle(e *svgpkg.Element, segs []svgpkg.PathSeg, mat svg
 	// Box centre sits half a radius from the diameter toward the bulge.
 	bx, by := c[0]+math.Cos(phi)*r/2, c[1]+math.Sin(phi)*r/2
 	ex, ey := m.toEMU(bx, by)
-	id := m.nextID()
+	id := m.idFor(e)
 	m.createShapeRotated(id, "FLOW_CHART_DELAY", ex, ey, m.lenEMU(r), m.lenEMU(2*r), phi)
 	m.styleShape(id, e, mat)
 	return true
@@ -244,7 +244,7 @@ func (m *Mapper) mapSemicircle(e *svgpkg.Element, segs []svgpkg.PathSeg, mat svg
 func (m *Mapper) emitPill(e *svgpkg.Element, x, y, w, h float64, mat svgpkg.Matrix) {
 	var ids []string
 	add := func(shape string, x, y, w, h float64) {
-		id := m.nextID()
+		id := m.idFor(e)
 		ex, ey := m.toEMU(x, y)
 		m.createShape(id, shape, ex, ey, m.lenEMU(w), m.lenEMU(h), 0)
 		m.styleShape(id, e, mat)
@@ -262,7 +262,7 @@ func (m *Mapper) emitPill(e *svgpkg.Element, x, y, w, h float64, mat svgpkg.Matr
 		add("ELLIPSE", x, y+h-w, w, w)
 	}
 	m.reqs = append(m.reqs, &slides.Request{GroupObjects: &slides.GroupObjectsRequest{
-		GroupObjectId:     m.nextID(),
+		GroupObjectId:     m.idFor(e),
 		ChildrenObjectIds: ids,
 	}})
 }

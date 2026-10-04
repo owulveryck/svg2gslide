@@ -31,8 +31,9 @@ type blob struct {
 
 // mapSilhouette tries to draw the image data as native shapes in the box
 // (x,y,w,h) (SVG user units, before mat). Returns false when the image is
-// not a simple monochrome silhouette.
-func (m *Mapper) mapSilhouette(data []byte, x, y, w, h float64, mat svgpkg.Matrix) bool {
+// not a simple monochrome silhouette. e is the <image> element the data came
+// from, and gives the created shapes their identity.
+func (m *Mapper) mapSilhouette(e *svgpkg.Element, data []byte, x, y, w, h float64, mat svgpkg.Matrix) bool {
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		return false
@@ -95,7 +96,7 @@ func (m *Mapper) mapSilhouette(data []byte, x, y, w, h float64, mat svgpkg.Matri
 		px, py := mat.Apply(x+float64(bl.minX)*sx, y+float64(bl.minY)*sy)
 		msx, msy := mat.ScaleFactors()
 		ex, ey := m.toEMU(px, py)
-		id := m.nextID()
+		id := m.idFor(e)
 		m.createShape(id, shape, ex, ey, m.lenEMU(float64(bw)*sx*msx), m.lenEMU(float64(bh)*sy*msy), 0)
 		m.reqs = append(m.reqs, &slides.Request{UpdateShapeProperties: &slides.UpdateShapePropertiesRequest{
 			ObjectId: id,
@@ -112,7 +113,7 @@ func (m *Mapper) mapSilhouette(data []byte, x, y, w, h float64, mat svgpkg.Matri
 	}
 	if len(ids) > 1 {
 		m.reqs = append(m.reqs, &slides.Request{GroupObjects: &slides.GroupObjectsRequest{
-			GroupObjectId: m.nextID(), ChildrenObjectIds: ids,
+			GroupObjectId: m.idFor(e), ChildrenObjectIds: ids,
 		}})
 	}
 	return true

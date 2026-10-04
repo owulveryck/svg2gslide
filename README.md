@@ -4,6 +4,10 @@ Converts an SVG file into a **native** Google Slides slide (editable shapes,
 lines and text boxes — not an image), appended to the end of an existing
 presentation.
 
+To iterate on a whole deck rather than append once, see
+[Sync](#sync-keep-a-deck-in-step-with-its-sources): an ordered list of SVGs
+becomes the deck, and only what changed is rewritten.
+
 ## Login
 
 Put your "Desktop app" OAuth client JSON where the tool looks for it, then log in:
@@ -83,6 +87,109 @@ go run ./cmd/presctl -presentation <ID> -list                      # slides + el
 go run ./cmd/presctl -presentation <ID> -dump <SLIDE_ID> [-json]   # boxes and text of a slide
 go run ./cmd/presctl -presentation <ID> -delete-slide <ID1>,<ID2> -export-pdf /tmp/deck.pdf
 ```
+
+## Sync: keep a deck in step with its sources
+
+`svg2gslide <file>` appends — handy once, awkward to iterate on. `svg2gslide
+sync` is the declarative form: **an ordered list of SVGs *is* the deck**, and
+sync reconciles the presentation with it. A changed source replaces its slide;
+unchanged slides are not touched; syncing twice does nothing the second time.
+
+```sh
+# the deck is the argument list; the shell's glob gives the order
+go run . sync -presentation <ID> slides/*.svg
+
+# or a manifest, which is what you commit to git
+cat deck.txt
+# the talk, in order
+intro.svg
+architecture.svg
+roadmap.svg
+go run . sync -presentation <ID> -deck deck.txt
+
+# see what would happen, with no API call at all
+go run . sync -dry-run -deck deck.txt
+```
+
+Sync writes a state file (`.svg2gslide.json`, next to the deck by default)
+recording what it pushed. That record is what lets it tell *"the source
+changed"* from *"someone edited the slide"*. Commit it alongside the sources;
+its diffs are meant to be read.
+
+### Nothing human is overwritten by accident
+
+A presentation is a shared document. Before writing, sync compares each slide
+to what it last pushed, and reads the comment threads. It refuses to overwrite
+a slide that carries human work:
+
+```
+slide   3  architecture.svg  source changed -> replaced
+slide   4  flow.svg  CONFLICT  (source changed, slide edited, open comments)
+    . text edited on /svg/g[2]/text[1] (id="auth-label")
+      pushed  : "Service A"
+      current : "Service Auth"
+    . comment by a teammate, 2026-10-02T09:12:00Z, open
+      anchored on /svg/g[3]/rect[1] (id="validation"), quoting "Validation"
+      "il manque la flèche de retour"
+    -> Port the divergences and comments below into flow.svg, then sync again.
+       To discard the work in the slide instead: -force flow.svg
+```
+
+Every finding names the **node of the source SVG** to edit, not just a Slides
+object ID. `-report json` emits the same thing in a form complete enough to
+hand to an LLM so it can patch the SVG without ever reading the deck.
+
+Resolve a conflict either way: port the feedback into the SVG and sync again,
+or `-force <source>` (or `-force all`) to let the source win.
+
+### Flags worth knowing
+
+| Flag | What it does |
+|---|---|
+| `-dry-run` | reconcile and report, write nothing |
+| `-report json` | the machine-readable report, with source locators |
+| `-force <sources>` | overwrite these slides despite a conflict; `all` for every one |
+| `-prune` | delete slides the deck no longer declares (see below) |
+| `-backup` | copy the presentation before writing |
+| `-geometry` | also compare element positions when detecting drift |
+| `-state <path>` | where the state file lives |
+
+**Nothing is ever deleted without `-prune`**, and even then only slides
+svg2gslide created: a slide added by hand is reported as an orphan and left
+alone. `-backup` takes a Drive copy first — there is no named-version API
+(a Drive revision carries no name, and `keepForever` is documented as applying
+only to files with binary content, so it is inert on a Slides file), so a copy
+is the only snapshot available.
+
+### Identity, and why ids matter
+
+Each slide's object ID is derived from its source path, and each shape's from
+the SVG node that produced it. That is what makes a comment left on a shape
+still resolve to the right source node after you edit the SVG elsewhere.
+
+For an HTML deck, a slide is identified by the `id` of its `<svg>` (or of its
+`<section>`). Without one it falls back to the inline SVG's position, and sync
+says so — such a slide loses its identity if you reorder the HTML. Giving your
+`<svg>` elements ids is worth the trouble.
+
+### Comments
+
+Reading comments anchored to a precise shape uses a Slides API feature that is
+in [Developer Preview](https://developers.google.com/workspace/preview). Without
+enrollment, sync falls back to the Drive comments API, whose anchor is opaque
+for editor files; comments are then tied to slides by matching their quoted
+text, and each one is marked `quoted-text-match` or `ambiguous`. The report
+always states which source was used, and says so explicitly when comments could
+not be read at all — silence would read as "no comments", which is a different
+claim.
+
+### What a failure leaves behind
+
+Sync clears the slides it is about to rebuild in one atomic, revision-guarded
+call: if anyone edited the deck since it was read, that call fails and nothing
+is lost. Everything after it only adds. If the run dies between the clear and
+the refill, the replaced slides are left empty — running sync again fixes them,
+and `-backup` is the belt for when that is not good enough.
 
 ## Web frontend (WebAssembly)
 

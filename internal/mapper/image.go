@@ -50,7 +50,7 @@ func (m *Mapper) mapImage(e *svgpkg.Element, mat svgpkg.Matrix) {
 			return
 		}
 		// Simple monochrome icons are redrawn natively (no hosting).
-		if m.mapSilhouette(data, e.FloatAttr("x", 0), e.FloatAttr("y", 0), w, h, mat) {
+		if m.mapSilhouette(e, data, e.FloatAttr("x", 0), e.FloatAttr("y", 0), w, h, mat) {
 			m.warnf("image %dx%d redessinée en formes natives", int(w), int(h))
 			return
 		}
@@ -64,7 +64,7 @@ func (m *Mapper) mapImage(e *svgpkg.Element, mat svgpkg.Matrix) {
 	sx, sy := mat.ScaleFactors()
 	ex, ey := m.toEMU(x, y)
 	m.reqs = append(m.reqs, &slides.Request{CreateImage: &slides.CreateImageRequest{
-		ObjectId: m.nextID(),
+		ObjectId: m.idFor(e),
 		Url:      src,
 		ElementProperties: &slides.PageElementProperties{
 			PageObjectId: m.cfg.SlideID,

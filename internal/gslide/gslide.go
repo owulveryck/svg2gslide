@@ -66,11 +66,18 @@ func (c *Client) PageSize(ctx context.Context, presentationID string) (w, h floa
 	return pres.PageSize.Width.Magnitude, pres.PageSize.Height.Magnitude, nil
 }
 
+// batchLimit is the most requests one batchUpdate call carries. Beyond it the
+// work is split across calls, which also means it stops being atomic.
+const batchLimit = 400
+
 // BatchUpdate executes the requests, chunked to stay within API limits.
+//
+// Note that a request list longer than batchLimit is sent as several calls, so
+// it is not applied atomically. Use BatchUpdateAtRevision for the steps where
+// that matters.
 func (c *Client) BatchUpdate(ctx context.Context, presentationID string, reqs []*slides.Request) error {
-	const chunkSize = 400
-	for start := 0; start < len(reqs); start += chunkSize {
-		end := min(start+chunkSize, len(reqs))
+	for start := 0; start < len(reqs); start += batchLimit {
+		end := min(start+batchLimit, len(reqs))
 		_, err := retry.DoWithResult(ctx, "presentations.batchUpdate", func() (*slides.BatchUpdatePresentationResponse, error) {
 			return c.Slides.Presentations.BatchUpdate(presentationID, &slides.BatchUpdatePresentationRequest{
 				Requests: reqs[start:end],

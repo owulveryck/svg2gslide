@@ -696,7 +696,7 @@ func (m *Mapper) groupBoxes(reg []*objRec, multi map[string]bool, hostTexts map[
 				claimed[id] = true
 			}
 			reqs = append(reqs, &slides.Request{GroupObjects: &slides.GroupObjectsRequest{
-				GroupObjectId: m.nextID(), ChildrenObjectIds: members}})
+				GroupObjectId: m.groupIDFor(members), ChildrenObjectIds: members}})
 		}
 	}
 	return reqs

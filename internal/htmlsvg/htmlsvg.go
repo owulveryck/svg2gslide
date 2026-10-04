@@ -17,7 +17,12 @@ import (
 type SVG struct {
 	Index int    // 1-based position among the returned SVGs
 	Title string // title of the enclosing slide (heading or .title element), may be ""
-	Data  []byte
+	// ID is the id of the <svg>, or of its slide container when the <svg>
+	// carries none; "" when neither does. It gives the slide an identity
+	// independent of its position in the document, which is what lets sync
+	// survive a reordered deck.
+	ID   string
+	Data []byte
 }
 
 // IsHTML reports whether data looks like an HTML document rather than a
@@ -80,7 +85,7 @@ func Extract(r io.Reader) ([]SVG, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, SVG{Index: i + 1, Title: slideTitle(f.slide), Data: data})
+		out = append(out, SVG{Index: i + 1, Title: slideTitle(f.slide), ID: slideID(f.node, f.slide), Data: data})
 	}
 	return out, nil
 }
@@ -167,6 +172,28 @@ func hasClass(n *html.Node, class string) bool {
 		}
 	}
 	return false
+}
+
+// slideID returns the id of the <svg>, falling back to the id of its slide
+// container.
+func slideID(svg, slide *html.Node) string {
+	if id := attr(svg, "id"); id != "" {
+		return id
+	}
+	if slide != nil {
+		return attr(slide, "id")
+	}
+	return ""
+}
+
+// attr returns the value of the namespace-less attribute, or "".
+func attr(n *html.Node, key string) string {
+	for _, a := range n.Attr {
+		if a.Namespace == "" && a.Key == key {
+			return a.Val
+		}
+	}
+	return ""
 }
 
 func hasAttr(n *html.Node, ns, key string) bool {

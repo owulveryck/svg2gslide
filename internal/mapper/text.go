@@ -397,7 +397,7 @@ func (m *Mapper) layoutText(e *svgpkg.Element, lines []*textLine, anchor string,
 		iS, iE, sa0, sbN := 0.0, 0.0, 0.0, 0.0
 		alignment, vAlign := alignment, "TOP"
 		if h == nil {
-			id = m.nextID()
+			id = m.idFor(e)
 			m.createRotatedBox(id, mat, ax, lines[0].baseline, bx, by, wEMU, hEMU)
 		} else {
 			id, iS, iE, sa0, sbN = h.id, h.indentStart, h.indentEnd, h.spaceAbove, h.spaceBelow
