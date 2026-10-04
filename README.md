@@ -150,10 +150,26 @@ go run . sync -presentation <ID> -deck deck.txt
 go run . sync -dry-run -deck deck.txt
 ```
 
-Sync writes a state file (`.svg2gslide.json`, next to the deck by default)
-recording what it pushed. That record is what lets it tell *"the source
-changed"* from *"someone edited the slide"*. Commit it alongside the sources;
-its diffs are meant to be read.
+Sync writes a state file next to the deck, recording what it pushed. That
+record is what lets it tell *"the source changed"* from *"someone edited the
+slide"*. Commit it alongside the sources; its diffs are meant to be read.
+
+The file is named after the presentation it records —
+`.svg2gslide-<presentationID>.json` — which has two consequences worth knowing:
+
+```sh
+# one directory can feed as many presentations as you like
+go run . sync -presentation <ID-A> slides/*.svg
+go run . sync -presentation <ID-B> slides/*.svg   # its own state file, no clash
+
+# and once a deck is synced, the state names its target: the flag is optional
+go run . sync slides/*.svg
+```
+
+`-presentation` is then needed only to create a presentation (`new`), or to
+pick one when the directory tracks several — in which case sync says so and
+lists them. A state file written by an older version (the bare
+`.svg2gslide.json`) is read once and rewritten under the new name.
 
 ### Nothing human is overwritten by accident
 
@@ -191,7 +207,7 @@ or `-force <source>` (or `-force all`) to let the source win.
 | `-prune` | delete slides the deck no longer declares (see below) |
 | `-backup` | copy the presentation before writing |
 | `-geometry` | also compare element positions when detecting drift |
-| `-state <path>` | where the state file lives |
+| `-state <path>` | where the state file lives (default: `.svg2gslide-<presentationID>.json` beside the deck) |
 
 **Nothing is ever deleted without `-prune`**, and even then only slides
 svg2gslide created: a slide added by hand is reported as an orphan and left

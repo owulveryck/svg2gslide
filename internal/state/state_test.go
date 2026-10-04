@@ -19,7 +19,7 @@ func TestLoadMissingFileIsEmptyNotAnError(t *testing.T) {
 }
 
 func TestSaveLoadRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), FileName)
+	path := DefaultPath(t.TempDir(), "1AbC")
 	want := &State{
 		PresentationID: "1AbC",
 		SyncedAt:       time.Date(2026, 10, 4, 12, 4, 0, 0, time.UTC),
@@ -66,7 +66,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 }
 
 func TestSaveIsReadableAndSortedForDiffs(t *testing.T) {
-	path := filepath.Join(t.TempDir(), FileName)
+	path := DefaultPath(t.TempDir(), "1AbC")
 	st := &State{Entries: []Entry{
 		{Key: "c.svg", SlideID: "c"},
 		{Key: "a.svg", SlideID: "a"},
@@ -93,7 +93,7 @@ func TestSaveIsReadableAndSortedForDiffs(t *testing.T) {
 }
 
 func TestLoadRefusesANewerSchema(t *testing.T) {
-	path := filepath.Join(t.TempDir(), FileName)
+	path := DefaultPath(t.TempDir(), "1AbC")
 	if err := os.WriteFile(path, []byte(`{"schemaVersion":99,"entries":[]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestLoadRefusesANewerSchema(t *testing.T) {
 }
 
 func TestLoadAcceptsAnOlderSchemaAndUpgradesIt(t *testing.T) {
-	path := filepath.Join(t.TempDir(), FileName)
+	path := DefaultPath(t.TempDir(), "1AbC")
 	if err := os.WriteFile(path, []byte(`{"schemaVersion":0,"entries":[{"key":"a.svg","slideId":"a"}]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -120,6 +120,130 @@ func TestLoadAcceptsAnOlderSchemaAndUpgradesIt(t *testing.T) {
 	}
 	if _, ok := st.Find("a.svg"); !ok {
 		t.Error("the older file's entry was lost")
+	}
+}
+
+func TestDefaultPathNamesThePresentation(t *testing.T) {
+	a := DefaultPath("slides", "1AbC")
+	b := DefaultPath("slides", "2DeF")
+	if a == b {
+		t.Fatal("two presentations must not share a state file: that is the whole point of the name")
+	}
+	if !strings.Contains(a, "1AbC") {
+		t.Errorf("path %q should name the presentation it records", a)
+	}
+	if filepath.Dir(a) != "slides" {
+		t.Errorf("path %q should sit beside the deck", a)
+	}
+	if got := filepath.Dir(DefaultPath("", "1AbC")); got != "." {
+		t.Errorf("an unnamed deck directory should be the working one, got %q", got)
+	}
+}
+
+func TestDiscoverListsEveryDeckTrackedBesideTheSources(t *testing.T) {
+	t.Run("missing directory records nothing", func(t *testing.T) {
+		ids, err := Discover(filepath.Join(t.TempDir(), "never-synced"))
+		if err != nil {
+			t.Fatalf("a deck that was never synced is not an error, got %v", err)
+		}
+		if len(ids) != 0 {
+			t.Errorf("got %v, want no presentation", ids)
+		}
+	})
+
+	t.Run("one file per presentation, sorted", func(t *testing.T) {
+		dir := t.TempDir()
+		for _, id := range []string{"2DeF", "1AbC"} {
+			if err := (&State{PresentationID: id}).Save(DefaultPath(dir, id)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Neither a source nor a leftover temp file is a state file.
+		if err := os.WriteFile(filepath.Join(dir, "a.svg"), []byte("<svg/>"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ids, err := Discover(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(ids) != 2 || ids[0] != "1AbC" || ids[1] != "2DeF" {
+			t.Errorf("got %v, want [1AbC 2DeF]", ids)
+		}
+	})
+
+	t.Run("a legacy file is found by what it records", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := (&State{PresentationID: "1AbC"}).Save(filepath.Join(dir, LegacyFileName)); err != nil {
+			t.Fatal(err)
+		}
+		ids, err := Discover(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(ids) != 1 || ids[0] != "1AbC" {
+			t.Errorf("got %v, want the legacy file's presentation [1AbC]", ids)
+		}
+	})
+}
+
+func TestLoadForMigratesTheLegacyFile(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, LegacyFileName)
+	old := &State{PresentationID: "1AbC", Entries: []Entry{{
+		Key: "a.svg", SlideID: "svg2gslide_a", SourceHash: SourceHash([]byte("<svg/>")),
+		Pushed: Fingerprint{Texts: []string{"Service A"}, Elements: 1},
+	}}}
+	if err := old.Save(legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	st, path, err := LoadFor(dir, "1AbC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != DefaultPath(dir, "1AbC") {
+		t.Errorf("save path = %q, want the per-presentation name", path)
+	}
+	// Losing the baseline would cost a whole deck's fingerprints and report
+	// every slide as one to adopt.
+	if _, ok := st.Find("a.svg"); !ok {
+		t.Fatal("the legacy baseline was not carried over")
+	}
+
+	if err := st.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Error("the legacy file should be gone once the deck is migrated")
+	}
+	again, _, err := LoadFor(dir, "1AbC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := again.Find("a.svg"); !ok {
+		t.Error("the migrated file lost the baseline")
+	}
+}
+
+func TestLoadForIgnoresALegacyFileForAnotherPresentation(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, LegacyFileName)
+	if err := (&State{PresentationID: "1AbC", Entries: []Entry{{Key: "a.svg"}}}).Save(legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	st, path, err := LoadFor(dir, "2DeF")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.PresentationID != "" || len(st.Entries) != 0 {
+		t.Errorf("another deck's state leaked in: %+v", st)
+	}
+	if err := st.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(legacy); err != nil {
+		t.Errorf("another deck's legacy file must be left alone, got %v", err)
 	}
 }
 

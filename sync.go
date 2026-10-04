@@ -48,12 +48,16 @@ type syncFlags struct {
 func syncUsage(fs *flag.FlagSet) func() {
 	return func() {
 		fmt.Fprintf(os.Stderr, `Usage:
-  %s sync -presentation <id|url|new> [flags] [file.svg ...]
+  %s sync [-presentation <id|url|new>] [flags] [file.svg ...]
 
 Reconciles a presentation with an ordered list of SVG sources: the list is the
 deck. A changed source replaces its slide; unchanged slides are left alone.
 A slide edited or commented on in Google Slides is reported, never silently
 overwritten.
+
+The state file beside the deck is named after the presentation it records, so
+-presentation can be left out once the deck has been synced: it is needed only
+to name a new presentation, or to pick one when the directory tracks several.
 
 Flags:
 `, filepath.Base(os.Args[0]))
@@ -65,10 +69,10 @@ func syncCommand(args []string) error {
 	fs := flag.NewFlagSet("sync", flag.ExitOnError)
 	fs.Usage = syncUsage(fs)
 	var f syncFlags
-	fs.StringVar(&f.presentation, "presentation", "", `target presentation ID or URL, or "new" to create one (required)`)
+	fs.StringVar(&f.presentation, "presentation", "", `target presentation ID or URL, or "new" to create one (default: the one the state beside the deck records)`)
 	fs.StringVar(&f.credentials, "credentials", "", "OAuth client or service account JSON (default: $SVG2GSLIDE_CREDENTIALS)")
 	fs.StringVar(&f.deckFile, "deck", "", "manifest listing the sources in order, one path per line (# comments)")
-	fs.StringVar(&f.statePath, "state", "", "sync state file (default: "+state.FileName+" beside the deck)")
+	fs.StringVar(&f.statePath, "state", "", "sync state file (default: "+state.FilePrefix+"<presentationID>.json beside the deck)")
 	fs.StringVar(&f.force, "force", "", `overwrite the slides of these sources despite a conflict: comma-separated, or "all"`)
 	fs.BoolVar(&f.prune, "prune", false, "delete the slides svg2gslide created that the deck no longer declares")
 	fs.BoolVar(&f.backup, "backup", false, "copy the presentation before writing (there is no named-version API; a copy is the only snapshot)")
@@ -94,9 +98,8 @@ func syncCommand(args []string) error {
 		fs.Usage()
 		return fmt.Errorf("no source given: pass SVG files, or a manifest with -deck")
 	}
-	if !f.dryRun && f.presentation == "" {
-		return fmt.Errorf(`-presentation is required (an ID, a URL, or "new")`)
-	}
+	// Whether -presentation is needed depends on what the deck directory
+	// already records, so resolveTarget is what demands it.
 	return runSync(context.Background(), f)
 }
 
@@ -105,11 +108,7 @@ func runSync(ctx context.Context, f syncFlags) error {
 	if err != nil {
 		return err
 	}
-	statePath := f.statePath
-	if statePath == "" {
-		statePath = state.DefaultPath(deckDir)
-	}
-	st, err := state.Load(statePath)
+	target, err := resolveTarget(f, deckDir)
 	if err != nil {
 		return err
 	}
@@ -121,10 +120,11 @@ func runSync(ctx context.Context, f syncFlags) error {
 		WithGeometry: f.geometry,
 	}
 
-	// A dry run with no presentation reconciles against an empty deck, which
-	// is enough to show what a first sync would create — and costs no API
-	// call at all.
-	if f.dryRun && f.presentation == "" {
+	// A dry run with nothing to name the presentation reconciles against an
+	// empty deck, which is enough to show what a first sync would create —
+	// and costs no API call at all.
+	if target == "" {
+		st := &state.State{}
 		plan := syncer.Reconcile(entries, st, &slides.Presentation{}, nil, opt)
 		return emitReport(f, report.Build(report.Input{
 			Plan: plan, State: st, Comments: &syncer.Comments{Source: syncer.SourceUnavailable}, DryRun: true,
@@ -136,12 +136,28 @@ func runSync(ctx context.Context, f syncFlags) error {
 		return err
 	}
 
-	presentationID, defaultSlides, err := resolvePresentation(ctx, client, f, st, entries)
+	presentationID, defaultSlides, err := resolvePresentation(ctx, client, target, entries)
+	if err != nil {
+		return err
+	}
+
+	// The state is named after the presentation it records, so it can only be
+	// loaded now that the presentation is named — a freshly created one
+	// included.
+	statePath := f.statePath
+	var st *state.State
+	if statePath == "" {
+		st, statePath, err = state.LoadFor(deckDir, presentationID)
+	} else {
+		st, err = state.Load(statePath)
+	}
 	if err != nil {
 		return err
 	}
 	if st.PresentationID != "" && st.PresentationID != presentationID {
-		return fmt.Errorf("%s records presentation %s, but %s was given; use a different -state for a different deck",
+		// Only reachable through an explicit -state: a derived path names this
+		// presentation and nothing else.
+		return fmt.Errorf("%s records presentation %s, but %s was given; drop -state to use the file named after this presentation",
 			statePath, st.PresentationID, presentationID)
 	}
 
@@ -184,6 +200,14 @@ func runSync(ctx context.Context, f syncFlags) error {
 
 	in := report.Input{Plan: plan, State: st, Live: live, Comments: comments, DryRun: f.dryRun, Now: time.Now().UTC()}
 	if f.dryRun || !plan.Writes() {
+		if !f.dryRun && st.Migrating() {
+			// Nothing to push, but a deck already in sync must still get its
+			// state out of the old single-deck file: waiting for the next
+			// change would leave it there indefinitely.
+			if err := st.Save(statePath); err != nil {
+				return err
+			}
+		}
 		return emitReport(f, report.Build(in))
 	}
 
@@ -250,14 +274,64 @@ func parseForce(s string) map[string]bool {
 	return out
 }
 
+// resolveTarget names the presentation to sync with, without calling the API.
+// It is also what picks the state file: the state is named after the
+// presentation it records, so naming the target and finding the state are the
+// same question.
+//
+// It returns "new" unresolved — creating the presentation is the API's job —
+// and "" only for a dry run with nothing at all to go on, which reconciles
+// offline against an empty deck.
+func resolveTarget(f syncFlags, deckDir string) (string, error) {
+	if f.presentation == "new" {
+		return "new", nil
+	}
+	if f.presentation != "" {
+		// The ID becomes part of the state file's name, so a string the
+		// extractor rejects is not one to pass through.
+		return convert.ExtractPresentationID(f.presentation)
+	}
+	if f.statePath != "" {
+		// An explicit state file names its presentation by what it records.
+		st, err := state.Load(f.statePath)
+		if err != nil {
+			return "", err
+		}
+		if st.PresentationID != "" {
+			return st.PresentationID, nil
+		}
+	}
+
+	ids, err := state.Discover(deckDir)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case len(ids) == 1:
+		return ids[0], nil
+	case len(ids) > 1:
+		return "", fmt.Errorf("%s tracks %d presentations (%s); name the one to sync with -presentation",
+			deckDirName(deckDir), len(ids), strings.Join(ids, ", "))
+	case f.dryRun:
+		return "", nil
+	default:
+		return "", fmt.Errorf(`-presentation is required (an ID, a URL, or "new"): nothing beside the deck records one yet`)
+	}
+}
+
+// deckDirName names a deck directory the way the user wrote it, for an error.
+func deckDirName(dir string) string {
+	if dir == "" {
+		return "."
+	}
+	return dir
+}
+
 // resolvePresentation names the target presentation, creating it on request.
 // defaultSlides holds the slides a freshly created presentation came with: not
 // part of the deck, and removed with the first push.
-func resolvePresentation(ctx context.Context, client *gslide.Client, f syncFlags, st *state.State, entries []deck.Entry) (id string, defaultSlides []string, err error) {
-	if f.presentation == "new" {
-		if st.PresentationID != "" {
-			return "", nil, fmt.Errorf(`-presentation new, but the state already tracks %s; drop the state file or name the presentation`, st.PresentationID)
-		}
+func resolvePresentation(ctx context.Context, client *gslide.Client, target string, entries []deck.Entry) (id string, defaultSlides []string, err error) {
+	if target == "new" {
 		title := "svg2gslide"
 		if len(entries) > 0 {
 			title = strings.TrimSuffix(filepath.Base(entries[0].Source), filepath.Ext(entries[0].Source))
@@ -269,10 +343,8 @@ func resolvePresentation(ctx context.Context, client *gslide.Client, f syncFlags
 		fmt.Printf("presentation created: https://docs.google.com/presentation/d/%s/edit\n", id)
 		return id, defaultSlides, nil
 	}
-	if id, err := convert.ExtractPresentationID(f.presentation); err == nil {
-		return id, nil, nil
-	}
-	return f.presentation, nil, nil
+	// Anything else resolveTarget has already reduced to a bare ID.
+	return target, nil, nil
 }
 
 // readComments gets the comments the best way available, and never fails the

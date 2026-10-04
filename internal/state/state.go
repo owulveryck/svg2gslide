@@ -2,7 +2,10 @@
 // sync can tell a changed source from a slide a human has edited.
 //
 // The file lives next to the deck sources, which are already versioned: the
-// state belongs in the same repository and its diffs are meant to be read.
+// state belongs in the same repository and its diffs are meant to be read. It
+// is named after the presentation it records, so one directory can track as
+// many presentations as it likes — and so a sync can find its target without
+// being told.
 package state
 
 import (
@@ -23,8 +26,14 @@ import (
 // is refused rather than misread.
 const SchemaVersion = 1
 
-// FileName is the default state file name.
-const FileName = ".svg2gslide.json"
+// FilePrefix and fileSuffix bracket the presentation ID in a state file's
+// name: the file says which deck it records, so one directory can track as
+// many presentations as it likes.
+const FilePrefix = ".svg2gslide-"
+const fileSuffix = ".json"
+
+// LegacyFileName is the single-deck state file earlier versions wrote.
+const LegacyFileName = ".svg2gslide.json"
 
 // State is the record of one presentation's last sync.
 type State struct {
@@ -35,6 +44,10 @@ type State struct {
 	// only valid for 24 hours, so it is never used as a drift reference.
 	RevisionID string  `json:"revisionId,omitempty"`
 	Entries    []Entry `json:"entries"`
+
+	// legacyPath is the LegacyFileName this state was read from, if any. Save
+	// removes it once the per-presentation file is in place.
+	legacyPath string
 }
 
 // Entry records one synced slide.
@@ -92,12 +105,97 @@ type Origin struct {
 	Text string `json:"text,omitempty"`
 }
 
-// DefaultPath returns the state file path for a deck rooted at dir.
-func DefaultPath(dir string) string {
+// DefaultPath returns the state file path for a deck rooted at dir synced with
+// presentation id.
+func DefaultPath(dir, presentationID string) string {
 	if dir == "" {
 		dir = "."
 	}
-	return filepath.Join(dir, FileName)
+	return filepath.Join(dir, FilePrefix+presentationID+fileSuffix)
+}
+
+// Discover lists the presentations the state files beside a deck record,
+// sorted. It is what lets a sync name its target without being told: a deck
+// directory tracking exactly one presentation needs no -presentation flag.
+//
+// A directory that does not exist records nothing, which is not an error: it
+// is simply a deck that was never synced.
+func Discover(dir string) ([]string, error) {
+	if dir == "" {
+		dir = "."
+	}
+	items, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, it := range items {
+		if it.IsDir() {
+			continue
+		}
+		name := it.Name()
+		if name == LegacyFileName {
+			// The name of a legacy file says nothing, so ask its contents
+			// which presentation it records. An unreadable one is skipped
+			// rather than fatal: discovery is a convenience, and naming the
+			// presentation explicitly must always remain a way out.
+			if st, err := Load(filepath.Join(dir, name)); err == nil && st.PresentationID != "" {
+				ids = append(ids, st.PresentationID)
+			}
+			continue
+		}
+		if id, ok := idFromName(name); ok {
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids)
+	return slices.Compact(ids), nil
+}
+
+// idFromName takes the presentation ID out of a state file's name.
+func idFromName(name string) (string, bool) {
+	if !strings.HasPrefix(name, FilePrefix) || !strings.HasSuffix(name, fileSuffix) {
+		return "", false
+	}
+	id := name[len(FilePrefix) : len(name)-len(fileSuffix)]
+	if id == "" {
+		return "", false
+	}
+	return id, true
+}
+
+// LoadFor reads the state recording presentation id for a deck rooted at dir,
+// and returns the path to save it back to.
+//
+// A legacy single-deck file is read when there is no per-presentation one yet
+// and it records this very presentation: losing that baseline would cost a
+// whole deck's worth of fingerprints, and every slide would come back as one
+// to adopt. The save path is always the per-presentation name, so the first
+// save migrates the deck.
+func LoadFor(dir, presentationID string) (*State, string, error) {
+	path := DefaultPath(dir, presentationID)
+	st, err := Load(path)
+	if err != nil {
+		return nil, "", err
+	}
+	if st.PresentationID != "" {
+		return st, path, nil
+	}
+
+	legacy := filepath.Join(dir, LegacyFileName)
+	if dir == "" {
+		legacy = LegacyFileName
+	}
+	old, err := Load(legacy)
+	if err != nil || old.PresentationID != presentationID {
+		// Another deck's file, or none: this presentation starts fresh.
+		return st, path, nil
+	}
+	old.legacyPath = legacy
+	return old, path, nil
 }
 
 // Load reads the state file. A missing file is not an error: it yields an
@@ -138,7 +236,7 @@ func (s *State) Save(path string) error {
 	data = append(data, '\n')
 
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, FileName+".tmp*")
+	tmp, err := os.CreateTemp(dir, FilePrefix+"tmp*")
 	if err != nil {
 		return err
 	}
@@ -154,7 +252,25 @@ func (s *State) Save(path string) error {
 	if err := os.Chmod(tmpName, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	if s.legacyPath != "" && s.legacyPath != path {
+		// The deck's state now lives under the presentation's own name.
+		// Leaving the old single-deck file behind would only mislead the next
+		// reader of the directory about which presentation it describes.
+		if err := os.Remove(s.legacyPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		s.legacyPath = ""
+	}
+	return nil
+}
+
+// Migrating reports whether this state was read from a LegacyFileName and
+// still owes its move to the per-presentation name, which the next Save does.
+func (s *State) Migrating() bool {
+	return s.legacyPath != ""
 }
 
 // Find returns the entry for a canonical key.

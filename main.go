@@ -312,7 +312,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `Usage:
   %[1]s login [-credentials file]
   %[1]s [flags] -presentation <id|url|new> [-svg file]      append one input
-  %[1]s sync -presentation <id|url|new> [flags] [file...]   reconcile a deck
+  %[1]s sync [-presentation <id|url|new>] [flags] [file...] reconcile a deck
 
 Appending is the one-shot form: the input becomes new slides at the end of the
 deck. Use "sync" to keep a presentation in step with an ordered list of SVGs,

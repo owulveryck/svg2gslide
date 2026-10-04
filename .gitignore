@@ -25,7 +25,10 @@
 !testdata/*.txt
 
 # Except a deck's sync state and manifest: both belong next to the sources
-# they describe, and their diffs are meant to be read.
+# they describe, and their diffs are meant to be read. A state file is named
+# after the presentation it records; the bare name is the one older versions
+# wrote, kept here so an existing one stays visible until it is migrated.
+!.svg2gslide-*.json
 !.svg2gslide.json
 !deck.txt
 

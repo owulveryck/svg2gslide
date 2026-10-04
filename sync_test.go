@@ -164,10 +164,114 @@ func TestSyncDryRunNeedsNoNetwork(t *testing.T) {
 			t.Errorf("report missing %q\n%s", want, data)
 		}
 	}
-	// A dry run must not write the state file.
-	if _, err := os.Stat(filepath.Join(dir, ".svg2gslide.json")); err == nil {
-		t.Error("a dry run wrote the state file")
+	// A dry run must not write a state file, under either name.
+	written, err := filepath.Glob(filepath.Join(dir, ".svg2gslide*.json"))
+	if err != nil {
+		t.Fatal(err)
 	}
+	if len(written) > 0 {
+		t.Errorf("a dry run wrote state: %v", written)
+	}
+}
+
+// TestResolveTarget covers how the presentation is named, which is also how
+// the state file is found: the state is named after the presentation it
+// records.
+func TestResolveTarget(t *testing.T) {
+	const idA = "1QcAfAtrbqEJZbLkFwD4QoPdtRQdMz7DmUnmEZBIr9_c"
+	const idB = "1FCml6BnI5WlOKbuMjS-PtpN5dHItaNFViMxwPsxX4Fc"
+
+	tracking := func(t *testing.T, ids ...string) string {
+		t.Helper()
+		dir := t.TempDir()
+		for _, id := range ids {
+			if err := (&state.State{PresentationID: id}).Save(state.DefaultPath(dir, id)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+
+	t.Run("new is left for the API to create", func(t *testing.T) {
+		got, err := resolveTarget(syncFlags{presentation: "new"}, tracking(t, idA))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "new" {
+			t.Errorf("target = %q, want %q even with a deck already tracked there", got, "new")
+		}
+	})
+
+	t.Run("a URL is reduced to its ID", func(t *testing.T) {
+		url := "https://docs.google.com/presentation/d/" + idA + "/edit#slide=id.svg2gslide_3ce50fb177"
+		got, err := resolveTarget(syncFlags{presentation: url}, t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != idA {
+			t.Errorf("target = %q, want %q", got, idA)
+		}
+	})
+
+	t.Run("an unusable presentation is refused", func(t *testing.T) {
+		// The ID becomes part of the state file's name, so it is never passed
+		// through unchecked.
+		_, err := resolveTarget(syncFlags{presentation: "../../etc"}, t.TempDir())
+		if err == nil {
+			t.Fatal("want an error for a string that is no presentation")
+		}
+	})
+
+	t.Run("one tracked deck needs no flag", func(t *testing.T) {
+		got, err := resolveTarget(syncFlags{}, tracking(t, idA))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != idA {
+			t.Errorf("target = %q, want the tracked %q", got, idA)
+		}
+	})
+
+	t.Run("several tracked decks ask which one", func(t *testing.T) {
+		_, err := resolveTarget(syncFlags{}, tracking(t, idA, idB))
+		if err == nil {
+			t.Fatal("want an error: nothing says which deck is meant")
+		}
+		for _, want := range []string{idA, idB, "-presentation"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %v, want it to mention %q", err, want)
+			}
+		}
+	})
+
+	t.Run("an explicit state file names its presentation", func(t *testing.T) {
+		dir := tracking(t, idA)
+		path := state.DefaultPath(dir, idA)
+		got, err := resolveTarget(syncFlags{statePath: path}, t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != idA {
+			t.Errorf("target = %q, want %q", got, idA)
+		}
+	})
+
+	t.Run("nothing at all is an offline dry run", func(t *testing.T) {
+		got, err := resolveTarget(syncFlags{dryRun: true}, t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "" {
+			t.Errorf("target = %q, want none so the dry run stays offline", got)
+		}
+	})
+
+	t.Run("nothing at all cannot be written to", func(t *testing.T) {
+		_, err := resolveTarget(syncFlags{}, t.TempDir())
+		if err == nil || !strings.Contains(err.Error(), "-presentation is required") {
+			t.Fatalf("error = %v, want it to require -presentation", err)
+		}
+	})
 }
 
 // TestDefaultSlideIsNotPartOfTheDeck locks in what a fresh presentation must
