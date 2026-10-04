@@ -17,6 +17,39 @@ mkdir -p ~/.config/svg2gslide && cp ~/Downloads/client_secret_*.json ~/.config/s
 go run . login
 ```
 
+<details>
+<summary>Don't have that JSON yet? Create one (one-time, ~2 min)</summary>
+
+`go run . login` prints these steps too, with the paths resolved for your
+machine. In the [Google Cloud console](https://console.cloud.google.com):
+
+1. **Create or pick a project** — [console.cloud.google.com/projectcreate](https://console.cloud.google.com/projectcreate)
+2. **Enable the two APIs** this tool calls —
+   [Slides](https://console.cloud.google.com/apis/library/slides.googleapis.com) and
+   [Drive](https://console.cloud.google.com/apis/library/drive.googleapis.com)
+3. **Configure consent**, under *Google Auth Platform* —
+   [Branding](https://console.cloud.google.com/auth/branding) (an app name and a
+   support email are enough), then
+   [Audience](https://console.cloud.google.com/auth/audience): *Internal* if your
+   Workspace organization allows it, otherwise *External* — and add your own
+   Google account under **Test users**, or consent will be refused
+4. **Create the client** — [Clients](https://console.cloud.google.com/auth/clients)
+   › *Create client* › Application type **Desktop app** › *Create* › *Download JSON*
+5. **Install it** at the path in the table below
+
+Three things that bite people later:
+
+- An *External* app left in **Testing** gives its test users a consent that
+  **expires after 7 days**, so `login` must be re-run weekly until you publish
+  the app (*Audience* › *Publish app*).
+- Any client type other than **Desktop app** fails: the flow needs a loopback
+  redirect on `127.0.0.1`, which only that type permits.
+- A service account key works instead for unattended use, but it has no access
+  to your personal Drive — share the target presentation with the service
+  account's email address first.
+
+</details>
+
 Opens your browser for Google consent, receives the callback on `127.0.0.1` and caches the
 token in `~/.local/state/svg2gslide/token.json` (mode `0600`). Without a cached token, any
 conversion triggers the same flow. Use `-presentation new` to create a fresh presentation
@@ -25,10 +58,16 @@ instead of passing an ID.
 Both locations follow the [XDG Base Directory Specification][xdg] — `$XDG_CONFIG_HOME` for the
 client you provide, `$XDG_STATE_HOME` for the token the tool writes:
 
-| File | Default | Overridden by |
+| File | Default (Linux) | Overridden by |
 |---|---|---|
 | OAuth client | `~/.config/svg2gslide/client.json` | `-credentials`, `$SVG2GSLIDE_CREDENTIALS`, `$XDG_CONFIG_HOME` |
 | Cached token | `~/.local/state/svg2gslide/token.json` | `$XDG_STATE_HOME` |
+
+The defaults above are the Linux ones. With the XDG variables unset, the client
+is read from `os.UserConfigDir()` — `~/Library/Application Support/svg2gslide`
+on macOS, `%AppData%\svg2gslide` on Windows — and on those two the token sits
+beside it. `go run . login` prints the paths it actually resolved, so run it
+once rather than guessing.
 
 [xdg]: https://specifications.freedesktop.org/basedir-spec/latest/
 

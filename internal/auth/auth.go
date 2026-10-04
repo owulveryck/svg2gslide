@@ -39,12 +39,13 @@ func GetOAuthClient(ctx context.Context, credentialsFile string) (*http.Client, 
 	if credentialsFile == "" {
 		creds, err := google.FindDefaultCredentials(ctx, scopes...)
 		if err != nil {
-			return nil, fmt.Errorf("no credentials file provided and ADC not available: %w\n"+
-				"Either provide --credentials or SVG2GSLIDE_CREDENTIALS,\n"+
-				"or run: gcloud auth application-default login "+
-				"--scopes=https://www.googleapis.com/auth/drive,"+
-				"https://www.googleapis.com/auth/presentations,"+
-				"https://www.googleapis.com/auth/cloud-platform", err)
+			// Same root cause as a bare "login", so give the same full
+			// procedure rather than a second, shorter riddle.
+			return nil, fmt.Errorf("%s\n\nApplication Default Credentials were tried as a fallback and are not\n"+
+				"available either (%v). If you would rather use those than an OAuth client:\n"+
+				"  gcloud auth application-default login \\\n"+
+				"    --scopes=https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/presentations",
+				MissingCredentialsHelp(), err)
 		}
 		opts := []option.ClientOption{option.WithCredentials(creds)}
 		quotaProject := creds.ProjectID
@@ -182,8 +183,7 @@ func ResolveCredentials(flagValue string) string {
 // returns the path of the token file.
 func Login(ctx context.Context, credentialsFile string) (string, error) {
 	if credentialsFile == "" {
-		return "", errors.New("no OAuth client JSON found: use -credentials, $SVG2GSLIDE_CREDENTIALS " +
-			"or ~/.config/svg2gslide/client.json (a \"Desktop app\" OAuth client)")
+		return "", errors.New(MissingCredentialsHelp())
 	}
 	b, err := os.ReadFile(credentialsFile)
 	if err != nil {
