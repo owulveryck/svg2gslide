@@ -1,11 +1,13 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,9 +115,50 @@ func TestStateDir(t *testing.T) {
 	})
 }
 
+func TestAccount(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     string
+		want    string
+		wantADC bool
+		wantErr bool
+	}{
+		{name: "unset keeps the single-account paths", env: "", want: ""},
+		{name: "a name becomes the segment", env: "orgA", want: "orgA"},
+		{name: "surrounding space is dropped", env: "  orgA  ", want: "orgA"},
+		{name: "adc asks for ADC by name", env: "adc", wantADC: true},
+		{name: "adc is case-insensitive", env: "ADC", wantADC: true},
+		{name: "a traversal is refused", env: "../evil", wantErr: true},
+		{name: "a separator is refused", env: "org/a", wantErr: true},
+		{name: "an absolute path is refused", env: "/org", wantErr: true},
+		{name: "dot is refused", env: ".", wantErr: true},
+		{name: "dotdot is refused", env: "..", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(accountEnv, tt.env)
+			segment, adc, err := account()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("account() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				// The reader has to see which variable to fix.
+				if !strings.Contains(err.Error(), accountEnv) {
+					t.Errorf("account() error does not name $%s: %v", accountEnv, err)
+				}
+				return
+			}
+			if segment != tt.want || adc != tt.wantADC {
+				t.Errorf("account() = %q, %v; want %q, %v", segment, adc, tt.want, tt.wantADC)
+			}
+		})
+	}
+}
+
 func TestTokenCachePath(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
+	t.Setenv(accountEnv, "")
 
 	got, err := tokenCachePath()
 	if err != nil {
@@ -131,16 +174,47 @@ func TestTokenCachePath(t *testing.T) {
 	}
 }
 
+// Two accounts have to end up in two files: one token for both would hand the
+// second account's OAuth client the first account's refresh token.
+func TestTokenCachePathSeparatesAccounts(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+
+	paths := map[string]string{}
+	for _, label := range []string{"", "orgA", "orgB"} {
+		t.Setenv(accountEnv, label)
+		got, err := tokenCachePath()
+		if err != nil {
+			t.Fatalf("tokenCachePath() with %s=%q: %v", accountEnv, label, err)
+		}
+		if want := filepath.Join(base, "svg2gslide", label, "token.json"); got != want {
+			t.Errorf("tokenCachePath() with %s=%q = %q, want %q", accountEnv, label, got, want)
+		}
+		if other, seen := paths[got]; seen {
+			t.Errorf("accounts %q and %q share the token file %q", other, label, got)
+		}
+		paths[got] = label
+	}
+
+	t.Setenv(accountEnv, "../evil")
+	if got, err := tokenCachePath(); err == nil {
+		t.Errorf("tokenCachePath() accepted a traversing account, returning %q", got)
+	}
+}
+
 func TestResolveCredentials(t *testing.T) {
 	cfg := t.TempDir()
 	xdgClient := filepath.Join(cfg, "svg2gslide", "client.json")
+	ownClient := filepath.Join(cfg, "svg2gslide", "orgA", "client.json")
 
 	tests := []struct {
 		name      string
 		flag      string
 		newEnv    string
 		oldEnv    string
+		account   string
 		writeFile bool
+		writeOwn  bool
 		want      string
 	}{
 		{name: "flag wins", flag: "/flag.json", newEnv: "/new.json", oldEnv: "/old.json", writeFile: true, want: "/flag.json"},
@@ -148,21 +222,38 @@ func TestResolveCredentials(t *testing.T) {
 		{name: "deprecated env over XDG", oldEnv: "/old.json", writeFile: true, want: "/old.json"},
 		{name: "XDG client when it exists", writeFile: true, want: xdgClient},
 		{name: "empty when nothing is found", want: ""},
+		// One OAuth client can authorize several accounts, so a client of the
+		// account's own is preferred but not required.
+		{name: "the account's own client wins", account: "orgA", writeFile: true, writeOwn: true, want: ownClient},
+		{name: "an account falls back to the shared client", account: "orgA", writeFile: true, want: xdgClient},
+		{name: "the credentials variable outranks the account", account: "orgA", newEnv: "/new.json", writeOwn: true, want: "/new.json"},
+		// Without the sentinel, an installed client.json would make the gcloud
+		// route unreachable for an organization that forbids creating one.
+		{name: "adc as the account skips every client file", account: "adc", writeFile: true, writeOwn: true, want: ""},
+		{name: "adc as the flag skips every client file", flag: "ADC", writeFile: true, want: ""},
+		{name: "adc in the credentials variable skips every client file", newEnv: "adc", writeFile: true, want: ""},
+		// The label is reported by GetOAuthClient and Login; discovery just
+		// stops rather than guessing which account was meant.
+		{name: "a malformed account finds nothing", account: "../evil", writeFile: true, want: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", cfg)
 			t.Setenv("SVG2GSLIDE_CREDENTIALS", tt.newEnv)
 			t.Setenv("SLIDES_CREDENTIALS", tt.oldEnv)
+			t.Setenv(accountEnv, tt.account)
 			// ResolveCredentials stats the file, so it has to be real.
 			if err := os.RemoveAll(filepath.Dir(xdgClient)); err != nil {
 				t.Fatal(err)
 			}
-			if tt.writeFile {
-				if err := os.MkdirAll(filepath.Dir(xdgClient), 0700); err != nil {
+			for path, write := range map[string]bool{xdgClient: tt.writeFile, ownClient: tt.writeOwn} {
+				if !write {
+					continue
+				}
+				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(xdgClient, []byte("{}"), 0600); err != nil {
+				if err := os.WriteFile(path, []byte("{}"), 0600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -170,6 +261,57 @@ func TestResolveCredentials(t *testing.T) {
 				t.Errorf("ResolveCredentials(%q) = %q, want %q", tt.flag, got, tt.want)
 			}
 		})
+	}
+}
+
+// noADC points the credential search at a file that is not there, so a machine
+// with real Application Default Credentials cannot make these tests reach the
+// network: GOOGLE_APPLICATION_CREDENTIALS is consulted first and its failure
+// is returned straight away, before the well-known file or GCE metadata.
+func noADC(t *testing.T) {
+	t.Helper()
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(t.TempDir(), "absent.json"))
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("SVG2GSLIDE_CREDENTIALS", "")
+	t.Setenv("SLIDES_CREDENTIALS", "")
+	t.Setenv(accountEnv, "")
+}
+
+func TestGetOAuthClientUsesADC(t *testing.T) {
+	// A credential discovery fixture: well-formed, never exchanged, so no
+	// request leaves the test.
+	adc := filepath.Join(t.TempDir(), "application_default_credentials.json")
+	const authorizedUser = `{"type":"authorized_user","client_id":"id.apps.googleusercontent.com","client_secret":"secret","refresh_token":"refresh"}`
+	if err := os.WriteFile(adc, []byte(authorizedUser), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", adc)
+	t.Setenv("GOOGLE_CLOUD_QUOTA_PROJECT", "")
+	t.Setenv("VERTEX_PROJECT_ID", "")
+	t.Setenv(accountEnv, "")
+
+	client, err := GetOAuthClient(context.Background(), "")
+	if err != nil {
+		t.Fatalf("GetOAuthClient(ctx, \"\") error: %v", err)
+	}
+	if client == nil {
+		t.Error("GetOAuthClient(ctx, \"\") returned a nil client")
+	}
+}
+
+func TestLoginWithoutAnyCredentials(t *testing.T) {
+	noADC(t)
+
+	res, err := Login(context.Background(), ResolveCredentials(""))
+	if err == nil {
+		t.Fatalf("Login() with no credentials succeeded, returning %+v", res)
+	}
+	// Login used to answer an absent client file with the OAuth-client
+	// procedure alone; it now has to offer the gcloud route as well.
+	for _, want := range []string{"Option A", "Option B"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Login() error is missing %q:\n%v", want, err)
+		}
 	}
 }
 

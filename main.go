@@ -47,7 +47,7 @@ func main() {
 		svgPath      = flag.String("svg", "", "input SVG file, or HTML page with inline SVGs (one slide each) (default: stdin)")
 		slideSel     = flag.String("slides", "", "HTML input only: SVGs to convert, 1-based, e.g. \"1-3,7,10-\" (default: all)")
 		presentation = flag.String("presentation", "", "target Google Slides presentation ID or URL, or \"new\" to create one (required)")
-		credentials  = flag.String("credentials", "", "OAuth client or service account JSON (default: $SVG2GSLIDE_CREDENTIALS)")
+		credentials  = flag.String("credentials", "", "OAuth client or service account JSON, or \"adc\" for Application Default Credentials (default: $SVG2GSLIDE_CREDENTIALS, then $SVG2GSLIDE_ACCOUNT)")
 		phase        = flag.String("phase", "", "active phase (default: the SVG's data-active-phase attribute)")
 		outThumbnail = flag.String("out-thumbnail", "", "download the new slide's PNG thumbnail to this path")
 		exportPDF    = flag.String("export-pdf", "", "export the whole presentation as PDF to this path")
@@ -424,12 +424,39 @@ Flags:
 // login runs the browser authorization flow and caches the token.
 func login(args []string) error {
 	fs := flag.NewFlagSet("login", flag.ExitOnError)
-	credentials := fs.String("credentials", "", "OAuth client JSON (default: $SVG2GSLIDE_CREDENTIALS)")
+	credentials := fs.String("credentials", "", "OAuth client JSON, or \"adc\" for Application Default Credentials (default: $SVG2GSLIDE_CREDENTIALS, then $SVG2GSLIDE_ACCOUNT)")
 	_ = fs.Parse(args)
-	path, err := auth.Login(context.Background(), auth.ResolveCredentials(*credentials))
+	res, err := auth.Login(context.Background(), auth.ResolveCredentials(*credentials))
 	if err != nil {
 		return err
 	}
-	fmt.Println("logged in; token saved to", path)
+	if !res.ADC {
+		// With three accounts on one machine, "logged in" alone says nothing:
+		// name the account and the file, so a direnv mistake shows up here
+		// rather than in someone else's Drive.
+		fmt.Printf("logged in%s%s; token saved to %s\n", as(res.Account), in(res.Label), res.TokenPath)
+		return nil
+	}
+	// Nothing was cached, so saying "logged in" alone would invite a hunt for
+	// a token file that is not there.
+	fmt.Printf("already logged in%s%s through Application Default Credentials\n", as(res.Account), in(res.Label))
+	fmt.Println("no OAuth client needed: gcloud holds the credential, svg2gslide caches nothing")
 	return nil
+}
+
+// as and in render the two halves of "logged in as <account> (<label>)" that
+// may be missing: the email is best effort, and the label only exists when
+// $SVG2GSLIDE_ACCOUNT is set.
+func as(account string) string {
+	if account == "" {
+		return ""
+	}
+	return " as " + account
+}
+
+func in(label string) string {
+	if label == "" {
+		return ""
+	}
+	return fmt.Sprintf(" (account %q)", label)
 }

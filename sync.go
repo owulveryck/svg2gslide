@@ -70,7 +70,7 @@ func syncCommand(args []string) error {
 	fs.Usage = syncUsage(fs)
 	var f syncFlags
 	fs.StringVar(&f.presentation, "presentation", "", `target presentation ID or URL, or "new" to create one (default: the one the state beside the deck records)`)
-	fs.StringVar(&f.credentials, "credentials", "", "OAuth client or service account JSON (default: $SVG2GSLIDE_CREDENTIALS)")
+	fs.StringVar(&f.credentials, "credentials", "", "OAuth client or service account JSON, or \"adc\" for Application Default Credentials (default: $SVG2GSLIDE_CREDENTIALS, then $SVG2GSLIDE_ACCOUNT)")
 	fs.StringVar(&f.deckFile, "deck", "", "manifest listing the sources in order, one path per line (# comments)")
 	fs.StringVar(&f.statePath, "state", "", "sync state file (default: "+state.FilePrefix+"<presentationID>.json beside the deck)")
 	fs.StringVar(&f.force, "force", "", `overwrite the slides of these sources despite a conflict: comma-separated, or "all"`)

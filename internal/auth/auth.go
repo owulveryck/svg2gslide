@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,16 +36,20 @@ import (
 // authorization with token caching. If the credentials file contains a service
 // account key, it falls back to service account authentication.
 func GetOAuthClient(ctx context.Context, credentialsFile string) (*http.Client, error) {
+	// Refuse a malformed account label here rather than resolve credentials
+	// around it: a run that silently ignored it would act as whichever account
+	// was logged in last, which is the mistake the label exists to prevent.
+	if _, _, err := account(); err != nil {
+		return nil, err
+	}
 
 	if credentialsFile == "" {
 		creds, err := google.FindDefaultCredentials(ctx, scopes...)
 		if err != nil {
 			// Same root cause as a bare "login", so give the same full
-			// procedure rather than a second, shorter riddle.
-			return nil, fmt.Errorf("%s\n\nApplication Default Credentials were tried as a fallback and are not\n"+
-				"available either (%v). If you would rather use those than an OAuth client:\n"+
-				"  gcloud auth application-default login \\\n"+
-				"    --scopes=https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/presentations",
+			// procedure rather than a second, shorter riddle. The procedure
+			// leads with option A, so the gcloud command is already in it.
+			return nil, fmt.Errorf("%s\n\nApplication Default Credentials were tried as a fallback and are not\navailable either (%v)",
 				MissingCredentialsHelp(), err)
 		}
 		opts := []option.ClientOption{option.WithCredentials(creds)}
@@ -97,6 +102,37 @@ func GetOAuthClient(ctx context.Context, credentialsFile string) (*http.Client, 
 	return oauth2.NewClient(ctx, creds.TokenSource), nil
 }
 
+// accountEnv is the one variable that selects a Google account. It names a
+// directory segment under the XDG directories, so switching account — three
+// organizations, three logins — is a single export in a direnv .envrc, honoured
+// by "login" when it writes the token and by every later call when it reads it.
+const accountEnv = "SVG2GSLIDE_ACCOUNT"
+
+// adcSentinel, as the value of accountEnv or of -credentials, asks for
+// Application Default Credentials by name. Without it a client.json sitting at
+// the default path always wins, so an organization that forbids creating an
+// OAuth client of your own could never reach the gcloud route.
+const adcSentinel = "adc"
+
+// account returns the directory segment that separates one Google account's
+// credentials from another's, and whether the ADC route was asked for by name.
+// The segment is a label, not a path: it becomes one component under the XDG
+// directories, so a separator or a traversal in it is refused rather than
+// quietly resolved somewhere else. An unset variable yields "", which leaves
+// every path exactly where a single-account install already has it.
+func account() (segment string, adc bool, err error) {
+	v := strings.TrimSpace(os.Getenv(accountEnv))
+	switch {
+	case v == "":
+		return "", false, nil
+	case strings.EqualFold(v, adcSentinel):
+		return "", true, nil
+	case v != filepath.Base(v), v == ".", v == "..":
+		return "", false, fmt.Errorf("$%s is an account name, not a path: %q cannot be a single directory under the credentials directory", accountEnv, v)
+	}
+	return v, false, nil
+}
+
 // configDir returns the base directory for user configuration. It honours
 // $XDG_CONFIG_HOME on every platform — os.UserConfigDir only consults it on
 // Unix — and otherwise falls back to the OS convention.
@@ -131,14 +167,23 @@ func stateDir() (string, error) {
 }
 
 // tokenCachePath returns the file holding the cached OAuth token. The token is
-// regenerable state, not configuration, so it lives under $XDG_STATE_HOME.
+// regenerable state, not configuration, so it lives under $XDG_STATE_HOME, and
+// under a per-account subdirectory when $SVG2GSLIDE_ACCOUNT names one. One file
+// for several accounts would hand a new account's OAuth client the previous
+// account's refresh token: Google refuses it when it has expired, and when it
+// has not, the conversion lands in the wrong Drive without a word.
+//
 // Creating the directory is left to saveToken, the only writer.
 func tokenCachePath() (string, error) {
 	dir, err := stateDir()
 	if err != nil {
 		return "", fmt.Errorf("cannot locate the token cache directory: %w", err)
 	}
-	return filepath.Join(dir, "svg2gslide", "token.json"), nil
+	segment, _, err := account()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "svg2gslide", segment, "token.json"), nil
 }
 
 func tokenFromFile(file string) (*oauth2.Token, error) {
@@ -154,57 +199,165 @@ func tokenFromFile(file string) (*oauth2.Token, error) {
 
 var scopes = []string{drive.DriveScope, slides.PresentationsScope}
 
-// ResolveCredentials returns the credentials file to use: the flag value, then
-// $SVG2GSLIDE_CREDENTIALS, then the deprecated $SLIDES_CREDENTIALS, then the
-// OAuth client under $XDG_CONFIG_HOME if present. It may return "", in which
-// case the caller falls back to application default credentials.
+// ResolveCredentials returns the credentials file to use, from the most
+// specific source to the least: the flag value, then $SVG2GSLIDE_CREDENTIALS,
+// then the deprecated $SLIDES_CREDENTIALS, then the OAuth client of the account
+// named by $SVG2GSLIDE_ACCOUNT, then the client shared by every account. The
+// per-account file is optional on purpose: one "Desktop app" client can
+// authorize all three accounts, and then only the tokens need separating.
+//
+// It may return "", in which case the caller falls back to application default
+// credentials; the value "adc" asks for those by name.
 func ResolveCredentials(flagValue string) string {
 	if flagValue != "" {
+		if strings.EqualFold(flagValue, adcSentinel) {
+			return ""
+		}
 		return flagValue
 	}
 	if v := os.Getenv("SVG2GSLIDE_CREDENTIALS"); v != "" {
+		if strings.EqualFold(v, adcSentinel) {
+			return ""
+		}
 		return v
 	}
 	if v := os.Getenv("SLIDES_CREDENTIALS"); v != "" {
 		slog.Warn("$SLIDES_CREDENTIALS is deprecated, use $SVG2GSLIDE_CREDENTIALS")
 		return v
 	}
-	if dir, err := configDir(); err == nil {
-		p := filepath.Join(dir, "svg2gslide", "client.json")
-		if _, err := os.Stat(p); err == nil {
+	// A malformed label stops the search here and is reported by
+	// GetOAuthClient and Login, which refuse to run at all.
+	segment, adc, err := account()
+	if err != nil || adc {
+		return ""
+	}
+	dir, err := configDir()
+	if err != nil {
+		return ""
+	}
+	if segment != "" {
+		if p := filepath.Join(dir, "svg2gslide", segment, "client.json"); fileExists(p) {
 			return p
 		}
+	}
+	if p := filepath.Join(dir, "svg2gslide", "client.json"); fileExists(p) {
+		return p
 	}
 	return ""
 }
 
-// Login runs the browser authorization flow with the OAuth client in
-// credentialsFile, ignoring any cached token, and stores the new token. It
-// returns the path of the token file.
-func Login(ctx context.Context, credentialsFile string) (string, error) {
+// fileExists reports whether a candidate credentials path is there to be read.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// LoginResult says which credential route the login took, so the caller can
+// report what actually happened instead of a token path that may not exist.
+type LoginResult struct {
+	// TokenPath is the file the new token was cached in. It is empty on the
+	// ADC route, where gcloud holds the credential and svg2gslide writes none.
+	TokenPath string
+	// ADC reports that Application Default Credentials are in use and no
+	// OAuth client of your own is needed.
+	ADC bool
+	// Account is the Google account the credentials resolve to, when the API
+	// named it.
+	Account string
+	// Label is the value of $SVG2GSLIDE_ACCOUNT the paths were resolved under,
+	// empty when it is unset. With three accounts on one machine, reporting it
+	// is how you confirm the login landed in the environment you meant.
+	Label string
+}
+
+// Login authorizes svg2gslide and returns how it did so. With an OAuth client
+// in credentialsFile it runs the browser flow, ignoring any cached token, and
+// stores the new one. With no client file it verifies Application Default
+// Credentials instead, which is a complete setup on its own.
+func Login(ctx context.Context, credentialsFile string) (LoginResult, error) {
+	label, _, err := account()
+	if err != nil {
+		return LoginResult{}, err
+	}
 	if credentialsFile == "" {
-		return "", errors.New(MissingCredentialsHelp())
+		res, err := loginWithADC(ctx)
+		if err != nil {
+			return LoginResult{}, err
+		}
+		res.Label = label
+		return res, nil
 	}
 	b, err := os.ReadFile(credentialsFile)
 	if err != nil {
-		return "", fmt.Errorf("unable to read credentials file: %w", err)
+		return LoginResult{}, fmt.Errorf("unable to read credentials file: %w", err)
 	}
 	config, err := google.ConfigFromJSON(b, scopes...)
 	if err != nil {
-		return "", fmt.Errorf("%s is not an OAuth client JSON (login needs a \"Desktop app\" client): %w", credentialsFile, err)
+		return LoginResult{}, fmt.Errorf("%s is not an OAuth client JSON (login needs a \"Desktop app\" client): %w", credentialsFile, err)
 	}
 	tok, err := getTokenFromWeb(ctx, config)
 	if err != nil {
-		return "", err
+		return LoginResult{}, err
 	}
 	path, err := tokenCachePath()
 	if err != nil {
-		return "", err
+		return LoginResult{}, err
 	}
 	if err := saveToken(path, tok); err != nil {
-		return "", fmt.Errorf("unable to save token: %w", err)
+		return LoginResult{}, fmt.Errorf("unable to save token: %w", err)
 	}
-	return path, nil
+	res := LoginResult{TokenPath: path, Label: label}
+	// Best effort: the token is already cached and usable, so a Drive that
+	// will not name the account is no reason to fail the login.
+	src := &persistingSource{src: config.TokenSource(ctx, tok), last: tok, path: path}
+	if email, err := driveAccount(ctx, oauth2.NewClient(ctx, src)); err != nil {
+		slog.Warn("logged in, but Drive did not name the account", "error", err)
+	} else {
+		res.Account = email
+	}
+	return res, nil
+}
+
+// driveAccount names the Google account a client is authorized as. With
+// several accounts on one machine the email address is the only way to tell
+// that a login landed on the intended one.
+func driveAccount(ctx context.Context, client *http.Client) (string, error) {
+	srv, err := drive.NewService(ctx, option.WithHTTPClient(client))
+	if err != nil {
+		return "", fmt.Errorf("unable to reach Drive: %w", err)
+	}
+	about, err := srv.About.Get().Fields("user/emailAddress").Context(ctx).Do()
+	if err != nil {
+		return "", err
+	}
+	if about.User == nil {
+		return "", nil
+	}
+	return about.User.EmailAddress, nil
+}
+
+// loginWithADC confirms Application Default Credentials rather than running a
+// browser flow: gcloud owns the refresh token, so there is nothing for
+// svg2gslide to obtain or cache. The Drive call is what makes this worth
+// running — discovery succeeds on a credential that was granted the wrong
+// scopes or names no quota project, and both only fail at the first real API
+// call. Better here than halfway through a conversion.
+func loginWithADC(ctx context.Context) (LoginResult, error) {
+	client, err := GetOAuthClient(ctx, "")
+	if err != nil {
+		return LoginResult{}, err
+	}
+	email, err := driveAccount(ctx, client)
+	if err != nil {
+		return LoginResult{}, fmt.Errorf("Application Default Credentials were found, but Google refused them: %w\n\n"+
+			"Usually they were granted without the scopes svg2gslide needs, or their\n"+
+			"quota project does not have the Slides and Drive APIs enabled. Granting\n"+
+			"the scopes again:\n\n  %s\n\n"+
+			"Or set up an OAuth client of your own instead — \"svg2gslide login\" with\n"+
+			"-credentials, or a client.json at the path it reports, prints the steps.",
+			err, indent(adcLoginCommand(), "  "))
+	}
+	return LoginResult{ADC: true, Account: email}, nil
 }
 
 // persistingSource writes refreshed tokens back to the cache file.

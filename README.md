@@ -10,6 +10,37 @@ becomes the deck, and only what changed is rewritten.
 
 ## Login
 
+Google OAuth always issues tokens on behalf of a registered client, so one is
+unavoidable — but it does not have to be a client you create. Pick either route
+below; both end with `go run . login`, which reports what you ended up with.
+
+### Option A — reuse gcloud's client
+
+With the [Google Cloud SDK](https://cloud.google.com/sdk/docs/install)
+installed there is nothing to set up in the console: `gcloud` lends svg2gslide
+its own OAuth client through Application Default Credentials.
+
+```sh
+gcloud auth application-default login \
+  --scopes=https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/presentations
+go run . login
+```
+
+Two conditions, both checked by `login` — it makes one Drive call and prints
+the account it resolved to:
+
+- the scopes above have to be granted at that `gcloud` login; svg2gslide
+  cannot add them to a credential created without them.
+- the quota project `gcloud` records needs the
+  [Slides](https://console.cloud.google.com/apis/library/slides.googleapis.com) and
+  [Drive](https://console.cloud.google.com/apis/library/drive.googleapis.com)
+  APIs enabled. Set `$GOOGLE_CLOUD_QUOTA_PROJECT` if it recorded none.
+
+This route caches nothing of its own: `gcloud` holds the credential, so the
+`client.json` and `token.json` paths below are not involved at all.
+
+### Option B — your own OAuth client
+
 Put your "Desktop app" OAuth client JSON where the tool looks for it, then log in:
 
 ```sh
@@ -60,8 +91,8 @@ client you provide, `$XDG_STATE_HOME` for the token the tool writes:
 
 | File | Default (Linux) | Overridden by |
 |---|---|---|
-| OAuth client | `~/.config/svg2gslide/client.json` | `-credentials`, `$SVG2GSLIDE_CREDENTIALS`, `$XDG_CONFIG_HOME` |
-| Cached token | `~/.local/state/svg2gslide/token.json` | `$XDG_STATE_HOME` |
+| OAuth client | `~/.config/svg2gslide/client.json` | `-credentials`, `$SVG2GSLIDE_CREDENTIALS`, `$SVG2GSLIDE_ACCOUNT`, `$XDG_CONFIG_HOME` |
+| Cached token | `~/.local/state/svg2gslide/token.json` | `$SVG2GSLIDE_ACCOUNT`, `$XDG_STATE_HOME` |
 
 The defaults above are the Linux ones. With the XDG variables unset, the client
 is read from `os.UserConfigDir()` — `~/Library/Application Support/svg2gslide`
@@ -70,6 +101,52 @@ beside it. `go run . login` prints the paths it actually resolved, so run it
 once rather than guessing.
 
 [xdg]: https://specifications.freedesktop.org/basedir-spec/latest/
+
+### Several Google accounts on one machine
+
+Three accounts in three organizations means three logins, and a single cached
+token would hand the next account's OAuth client the previous account's refresh
+token — a refusal at best, a slide appended to the wrong Drive at worst. Name
+the account instead, and the client and the token both move with it:
+
+```sh
+# ~/work/orgA/.envrc — one line is the whole setup
+export SVG2GSLIDE_ACCOUNT=orgA
+```
+
+```
+~/.config/svg2gslide/orgA/client.json        the client for this account, if it has its own
+~/.config/svg2gslide/client.json             the fallback: one client can authorize all three
+~/.local/state/svg2gslide/orgA/token.json    written by login, read by every later call
+```
+
+Run `go run . login` once per account — it prints the Google account it ended up
+as, which is how you confirm the right `.envrc` was loaded. With the variable
+unset, every path stays exactly where it was, so nothing to migrate.
+
+A client JSON is only needed per account if the organizations give you separate
+ones; a single "Desktop app" client that consents to all three accounts works,
+and the tokens stay separate regardless.
+
+For an organization that forbids creating an OAuth client, the same variable
+hands that directory to `gcloud` instead:
+
+```sh
+# ~/work/orgC/.envrc
+export SVG2GSLIDE_ACCOUNT=adc   # ignore any client.json, use Application Default Credentials
+export CLOUDSDK_CONFIG=$HOME/.config/gcloud-orgC
+export GOOGLE_APPLICATION_CREDENTIALS=$CLOUDSDK_CONFIG/application_default_credentials.json
+export GOOGLE_CLOUD_QUOTA_PROJECT=orgc-slides-123
+```
+
+`$CLOUDSDK_CONFIG` is for `gcloud` itself — it is where
+`gcloud auth application-default login` then writes the credential;
+`$GOOGLE_APPLICATION_CREDENTIALS` is what svg2gslide reads, because the Go
+OAuth library looks for the well-known file under `$HOME` and ignores
+`$CLOUDSDK_CONFIG`.
+
+For a one-off outside its directory, the variable travels on the command line:
+`SVG2GSLIDE_ACCOUNT=orgB go run . sync …`.
 
 > **Upgrading from an earlier version:** the token used to be cached in
 > `~/.credentials/slideappscripter-token.json` and the client read from

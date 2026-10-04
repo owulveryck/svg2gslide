@@ -20,7 +20,7 @@ import (
 func main() {
 	var (
 		presentation = flag.String("presentation", "", "presentation ID (required)")
-		credentials  = flag.String("credentials", "", "OAuth client or service account JSON (default: $SVG2GSLIDE_CREDENTIALS)")
+		credentials  = flag.String("credentials", "", "OAuth client or service account JSON, or \"adc\" for Application Default Credentials (default: $SVG2GSLIDE_CREDENTIALS, then $SVG2GSLIDE_ACCOUNT)")
 		deleteSlide  = flag.String("delete-slide", "", "comma-separated object IDs of slides to delete")
 		exportPDF    = flag.String("export-pdf", "", "export the presentation as PDF to this path")
 		list         = flag.Bool("list", false, "list slides with element counts")
