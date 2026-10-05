@@ -37,3 +37,8 @@
 
 # Re-ignore generated/binary files that might match above
 *.test
+
+# ...and the state files under testdata: those record a real presentation from
+# a manual run against someone's Drive, not a fixture any test reads.
+testdata/.svg2gslide-*.json
+testdata/.svg2gslide.json
