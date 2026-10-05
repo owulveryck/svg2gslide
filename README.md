@@ -6,7 +6,16 @@ presentation.
 
 To iterate on a whole deck rather than append once, see
 [Sync](#sync-keep-a-deck-in-step-with-its-sources): an ordered list of SVGs
-becomes the deck, and only what changed is rewritten.
+becomes the deck, and only what changed is rewritten. To write those SVGs in the
+first place, and to apply the comments the reviewers leave on them, see
+[Companion: mdslides](#companion-mdslides--from-a-prompt-to-a-reviewed-deck).
+
+```sh
+go install github.com/owulveryck/svg2gslide@latest
+```
+
+Inside this checkout, `go run .` replaces the binary — which is how the examples
+below are written.
 
 ## Login
 
@@ -358,6 +367,56 @@ call: if anyone edited the deck since it was read, that call fails and nothing
 is lost. Everything after it only adds. If the run dies between the clear and
 the refill, the replaced slides are left empty — running sync again fixes them,
 and `-backup` is the belt for when that is not good enough.
+
+## Companion: mdslides — from a prompt to a reviewed deck
+
+svg2gslide takes SVGs; it does not write them.
+[mdslides](https://github.com/owulveryck/mdslides) does: a deck is one markdown
+file, each slide is a `layout` and its keys in a ```` ```slide ```` block, and
+compiling renders one SVG per slide while checking a house style (minimum text size,
+contrast, cards and words per slide). Its authoring guide is written for an LLM as
+much as for a human and ships inside the binary, so an agent can read the rules it
+has to follow — `mdslides guide`.
+
+Together they close a loop with a human review in the middle. The deck lives in
+neither tool's repository, so these commands assume both are installed
+(`go install github.com/owulveryck/mdslides@latest`) and run from the deck's own
+directory:
+
+```sh
+# 1. a prompt becomes a deck: the agent reads `mdslides guide`, then writes deck.md
+mdslides new deck.md
+
+# 2. render one SVG per slide
+mdslides -format lecture deck.md        # -> deck/gen/lecture/NN_<layout>.svg
+
+# 3. publish, as native editable Slides objects
+svg2gslide sync -presentation new deck/gen/lecture/*.svg
+
+# 4. the reviewers comment in Google Slides, on the shapes themselves
+
+# 5. read the review back, machine-first
+svg2gslide sync -dry-run -report json -report-out review.json deck/gen/lecture/*.svg
+
+# 6. the agent edits deck.md — never the generated SVGs — and goes round again
+mdslides -format lecture deck.md && svg2gslide sync deck/gen/lecture/*.svg
+```
+
+Publish the `lecture` profile, not `salle`: `lecture` renders final states only, so
+it emits exactly one file per slide, whereas `salle` splits a stepped slide into
+`NN_<layout>.stepK.svg`. One file per slide and a stable path is what makes the
+round trip work — [slide ids are derived from the source path](#identity-and-why-ids-matter),
+so a comment anchored on a shape still names that shape after a recompile.
+
+The filename is the map back to the markdown: in `lecture`, `NN` is the slide's
+position in `deck.md`, counting the `#` divider and every `##`, so a comment
+reported against `04_quad.svg` belongs to the 4th slide. (A slide with no
+```` ```slide ```` block renders no SVG, leaves a gap in the numbering, and never
+reaches Google Slides.)
+
+The whole loop is packaged as a skill for coding agents:
+[`.claude/skills/deck-to-gslides/`](.claude/skills/deck-to-gslides/SKILL.md) —
+copy it into the `.claude/skills/` of the repo where the deck lives.
 
 ## Web frontend (WebAssembly)
 
